@@ -1,0 +1,304 @@
+<SetupScreen>:
+    BoxLayout:
+        orientation: 'vertical'
+        padding: [30, 50]
+        spacing: 20
+        canvas.before:
+            Color:
+                rgb: 0.98, 0.98, 0.98
+            Rectangle:
+                pos: self.pos
+                size: self.size
+        
+        Label:
+            text: 'Настройка профиля'
+            font_size: 28
+            color: 0.1, 0.1, 0.1, 1
+            size_hint_y: None
+            height: 80
+            bold: True
+        
+        BoxLayout:
+            orientation: 'vertical'
+            spacing: 15
+            
+            TextInput:
+                id: weight_input
+                hint_text: 'Вес (кг)'
+                font_size: 20
+                multiline: False
+                input_filter: 'float'
+                size_hint_y: None
+                height: 50
+                padding: [10, 12]
+                # Делаем поле просто белым
+                background_normal: ''
+                background_active: ''
+                background_color: 1, 1, 1, 1
+                cursor_color: 0.1, 0.1, 0.1, 1
+            
+            TextInput:
+                id: height_input
+                hint_text: 'Рост (см)'
+                font_size: 20
+                multiline: False
+                input_filter: 'float'
+                size_hint_y: None
+                height: 50
+                padding: [10, 12]
+                background_normal: ''
+                background_active: ''
+                background_color: 1, 1, 1, 1
+                cursor_color: 0.1, 0.1, 0.1, 1
+                
+            TextInput:
+                id: goal_input
+                hint_text: 'Цель шагов'
+                font_size: 20
+                multiline: False
+                input_filter: 'int'
+                size_hint_y: None
+                height: 50
+                padding: [10, 12]
+                background_normal: ''
+                background_active: ''
+                background_color: 1, 1, 1, 1
+                cursor_color: 0.1, 0.1, 0.1, 1
+            
+        Widget:
+            size_hint_y: 1
+
+        Button:
+            text: 'Начать работу'
+            size_hint_y: None
+            height: 60
+            background_normal: ''
+            background_color: 0.12, 0.58, 0.95, 1
+            font_size: 20
+            bold: True
+            on_release: root.save_profile()
+<MainScreen>:
+    BoxLayout:
+        orientation: 'vertical'
+        canvas.before:
+            Color:
+                rgb: 0.98, 0.98, 0.98
+            Rectangle:
+                pos: self.pos
+                size: self.size
+
+        ActionBar:
+            pos_hint: {'top': 1}
+            ActionView:
+                ActionPrevious:
+                    title: 'Фитнес Трекер'
+                    with_previous: False
+                    app_icon: ''       
+                ActionButton:
+                    text: 'Настройки'
+                    on_release: root.open_settings()
+
+        BoxLayout:
+            orientation: 'vertical'
+            padding: [20, 20]
+            spacing: 10
+
+            # Блок с кругом
+            BoxLayout:
+                size_hint_y: None
+                height: 280
+                padding: 10
+                
+                RelativeLayout:
+                    # Этот контейнер гарантирует, что центр (0.5, 0.5) 
+                    # будет всегда в середине отведенного под круг места
+                    canvas:
+                        # Серое кольцо (фон)
+                        Color:
+                            rgba: 0.9, 0.9, 0.9, 1
+                        Line:
+                            circle: (self.width / 2, self.height / 2, 100)
+                            width: 12
+                        # Синее кольцо (прогресс)
+                        Color:
+                            rgba: 0.12, 0.58, 0.95, 1
+                        Line:
+                            circle: (self.width / 2, self.height / 2, 100, 0, root.progress_angle)
+                            width: 12
+                            cap: 'round'
+                    
+                    # Текстовый блок строго по центру RelativeLayout
+                    BoxLayout:
+                        orientation: 'vertical'
+                        size_hint: (None, None)
+                        size: (200, 100)
+                        # Центрируем сам BoxLayout внутри RelativeLayout
+                        pos_hint: {'center_x': 0.5, 'center_y': 0.5}
+                        
+                        Label:
+                            id: steps_label
+                            text: '0'
+                            font_size: 48
+                            bold: True
+                            color: 0.1, 0.1, 0.1, 1
+                            size_hint_y: None
+                            height: 60
+                        Label:
+                            id: goal_label
+                            text: 'из 10000'
+                            font_size: 16
+                            color: 0.5, 0.5, 0.5, 1
+                            size_hint_y: None
+                            height: 20
+
+            # Данные (Дистанция и Калории)
+            BoxLayout:
+                size_hint_y: None
+                height: 100
+                spacing: 20
+                
+                BoxLayout:
+                    orientation: 'vertical'
+                    Label:
+                        text: 'Дистанция'
+                        color: 0.5, 0.5, 0.5, 1
+                    Label:
+                        id: dist_label
+                        text: '0 км'
+                        bold: True
+                        font_size: 22
+                        color: 0.2, 0.2, 0.2, 1
+
+                BoxLayout:
+                    orientation: 'vertical'
+                    Label:
+                        text: 'Калории'
+                        color: 0.5, 0.5, 0.5, 1
+                    Label:
+                        id: kcal_label
+                        text: '0 ккал'
+                        bold: True
+                        font_size: 22
+                        color: 0.2, 0.2, 0.2, 1
+            
+            Widget: # Пружина вниз
+                size_hint_y: 1
+
+<StatsScreen>:
+    BoxLayout:
+        orientation: 'vertical'
+        canvas.before:
+            Color:
+                rgb: 0.98, 0.98, 0.98
+            Rectangle:
+                pos: self.pos
+                size: self.size
+
+        # Чёрная полоса сверху (ActionBar)
+        ActionBar:
+            pos_hint: {'top': 1}
+            ActionView:
+                ActionPrevious:
+                    title: 'Статистика'
+                    with_previous: False
+                    app_icon: '' # Убираем иконку, если не нужна
+                
+                # Кнопки периодов
+                ActionButton:
+                    text: 'Неделя'
+                    on_release: root.set_mode('week')
+                ActionButton:
+                    text: 'Месяц'
+                    on_release: root.set_mode('month')
+                ActionButton:
+                    text: 'Год'
+                    on_release: root.set_mode('year')
+
+        # Основной контент страницы (навигация по датам и график)
+        BoxLayout:
+            orientation: 'vertical'
+            padding: [10, 10]
+            spacing: 10
+
+            # Панель навигации по датам (стрелочки)
+            BoxLayout:
+                size_hint_y: None
+                height: 50
+                padding: [10, 0]
+                Button:
+                    text: '<'
+                    size_hint_x: None
+                    width: 50
+                    background_normal: ''
+                    background_color: 0.9, 0.9, 0.9, 1
+                    color: 0.1, 0.1, 0.1, 1
+                    on_release: root.change_offset(1)
+                Label:
+                    id: chart_label
+                    text: 'Загрузка...'
+                    color: 0.2, 0.2, 0.2, 1
+                    bold: True
+                    font_size: 18
+                Button:
+                    text: '>'
+                    size_hint_x: None
+                    width: 50
+                    background_normal: ''
+                    background_color: 0.9, 0.9, 0.9, 1
+                    color: 0.1, 0.1, 0.1, 1
+                    on_release: root.change_offset(-1)
+
+            # Область самого графика
+            ActivityChart:
+                id: chart
+                size_hint_y: 1
+
+<SettingsPopup>:
+    BoxLayout:
+        orientation: 'vertical'
+        padding: 20
+        spacing: 15
+        
+        Label:
+            text: 'Изменить параметры'
+            font_size: 20
+            bold: True
+            size_hint_y: None
+            height: 40
+        
+        TextInput:
+            id: weight_input
+            hint_text: 'Вес (кг)'
+            multiline: False
+            input_filter: 'float'
+            size_hint_y: None
+            height: 45
+        
+        TextInput:
+            id: height_input
+            hint_text: 'Рост (см)'
+            multiline: False
+            input_filter: 'float'
+            size_hint_y: None
+            height: 45
+            
+        TextInput:
+            id: goal_input
+            hint_text: 'Цель шагов'
+            multiline: False
+            input_filter: 'int'
+            size_hint_y: None
+            height: 45
+            
+        BoxLayout:
+            size_hint_y: None
+            height: 50
+            spacing: 10
+            Button:
+                text: 'Отмена'
+                on_release: root.dismiss()
+            Button:
+                text: 'Сохранить'
+                background_color: 0.12, 0.58, 0.95, 1
+                background_normal: ''
+                on_release: root.update_profile()
