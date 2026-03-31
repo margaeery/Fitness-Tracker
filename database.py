@@ -1,16 +1,26 @@
 import sqlite3
 from datetime import datetime
+import os
+
+# Путь к данным приложения (работает на Android и desktop)
+try:
+    from android.storage import app_storage_path
+    DB_PATH = app_storage_path()
+except ImportError:
+    DB_PATH = os.path.dirname(os.path.abspath(__file__))
 
 class FitnessDB:
     def __init__(self, db_name="fitness_data.db"):
         # При инициализации создаем соединение и таблицы
-        self.conn = sqlite3.connect(db_name)
+        db_full_path = os.path.join(DB_PATH, db_name)
+        os.makedirs(DB_PATH, exist_ok=True)
+        self.conn = sqlite3.connect(db_full_path)
         self.create_tables()
 
     def create_tables(self):
         cursor = self.conn.cursor()
-        
-        # 1. Таблица активности (шаги за каждый день)
+
+        # Таблица активности
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS daily_activity (
                 date TEXT PRIMARY KEY,
@@ -19,8 +29,8 @@ class FitnessDB:
                 calories REAL DEFAULT 0.0
             )
         ''')
-        
-        # 2. Таблица метрик пользователя (параметры тела и цели)
+
+        # Таблица метрик пользователя
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_metrics (
                 date TEXT PRIMARY KEY,
@@ -29,9 +39,9 @@ class FitnessDB:
                 step_goal INTEGER
             )
         ''')
+
         self.conn.commit()
 
-    # --- Методы для работы с профилем пользователя ---
 
     def save_user_metrics(self, weight, height, goal):
         """Сохраняет или обновляет параметры пользователя на текущую дату"""
@@ -50,14 +60,12 @@ class FitnessDB:
         res = cursor.fetchone()
         return res if res else None
 
-    # --- Методы для работы с шагами ---
 
     def add_steps(self, steps_to_add):
         """Добавляет шаги к текущему дню"""
         today = datetime.now().strftime('%Y-%m-%d')
         cursor = self.conn.cursor()
         
-        # Проверяем, есть ли запись за сегодня
         cursor.execute('SELECT steps FROM daily_activity WHERE date = ?', (today,))
         res = cursor.fetchone()
         
@@ -77,39 +85,48 @@ class FitnessDB:
         res = cursor.fetchone()
         return res[0] if res else 0
     
-    # --- Методы для статистики и графиков ---
 
     def get_data_for_range(self, start_date, end_date):
-        """Возвращает данные и метки (дни) для диапазона дат"""
+        """Возвращает метки дат и словари данных для диапазона"""
         cursor = self.conn.cursor()
+        # Извлекаем все нужные поля
         cursor.execute('''
-            SELECT strftime('%d.%m', date), steps FROM daily_activity 
+            SELECT strftime('%d.%m', date), steps, distance, calories 
+            FROM daily_activity 
             WHERE date >= ? AND date <= ? ORDER BY date ASC
         ''', (start_date, end_date))
         rows = cursor.fetchall()
         
-        # Возвращаем два списка: [шаги], [метки_дат]
         if not rows:
-            return [], []
-        return [r[1] for r in rows], [r[0] for r in rows]
+            return [], {'steps': [], 'distance': [], 'calories': []}
+        
+        labels = [r[0] for r in rows]
+        data = {
+            'steps': [r[1] for r in rows],
+            'distance': [r[2] for r in rows],
+            'calories': [r[3] for r in rows]
+        }
+        return labels, data
 
     def get_year_data_for_specific_year(self, year):
-        """Возвращает суммы шагов по месяцам для конкретного года"""
+        """Возвращает суммы по месяцам для года"""
         cursor = self.conn.cursor()
-        steps = []
-        # Сокращенные названия месяцев для графика
         labels = ["Янв", "Фев", "Мар", "Апр", "Май", "Июн", "Июл", "Авг", "Сен", "Окт", "Ноя", "Дек"]
+        res_data = {'steps': [], 'distance': [], 'calories': []}
         
         for i in range(1, 13):
             month_str = f"{i:02d}"
             cursor.execute('''
-                SELECT SUM(steps) FROM daily_activity 
+                SELECT SUM(steps), SUM(distance), SUM(calories) 
+                FROM daily_activity 
                 WHERE strftime('%m', date) = ? AND strftime('%Y', date) = ?
             ''', (month_str, str(year)))
-            res = cursor.fetchone()[0]
-            steps.append(res if res else 0)
+            res = cursor.fetchone()
+            res_data['steps'].append(res[0] if res[0] else 0)
+            res_data['distance'].append(res[1] if res[1] else 0)
+            res_data['calories'].append(res[2] if res[2] else 0)
             
-        return steps, labels
+        return labels, res_data
 
     def close(self):
         """Закрыть соединение с базой"""

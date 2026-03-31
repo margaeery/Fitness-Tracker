@@ -18,7 +18,7 @@ def fill_with_test_data():
     # Начинаем с 1 января 2026 года
     start_date = datetime(2026, 1, 1)
     # Заполняем по текущий день (15 марта 2026)
-    end_date = datetime(2026, 3, 15)
+    end_date = datetime(2026, 3, 20)
     
     current_date = start_date
     count = 0

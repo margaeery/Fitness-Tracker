@@ -1,11 +1,16 @@
-__version__ = "0.1"
+# from kivy.config import Config
+# # Настройки окна для тестирования на компьютере
+# Config.set('graphics', 'width', '360')
+# Config.set('graphics', 'height', '800')
+# #Config.set('graphics', 'resizable', False)
 from kivy.app import App
 from kivy.uix.screenmanager import ScreenManager, Screen, NoTransition
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.carousel import Carousel
 from kivy.uix.button import Button
+from kivy.metrics import dp, sp
 import os
-    
+
 # Импортируем классы и БД
 from database import FitnessDB
 from widgets import SetupScreen, MainScreen, StatsScreen
@@ -14,13 +19,13 @@ class FitnessApp(App):
     def build(self):
         # Инициализация базы данных
         self.db = FitnessDB()
-        
+
         # Проверяем, настроен ли профиль пользователя
         metrics = self.db.get_latest_metrics()
-        
+
         # Основной менеджер экранов
         self.root_manager = ScreenManager(transition=NoTransition())
-        
+
         if not metrics:
             # Если данных нет, добавляем экран первичной настройки
             setup_screen = SetupScreen(name='setup')
@@ -29,7 +34,7 @@ class FitnessApp(App):
             # Если данные есть, создаем основной интерфейс с навигацией
             main_layout = self.create_main_layout()
             self.root_manager.add_widget(main_layout)
-            
+
         return self.root_manager
 
     def restart_with_nav(self):
@@ -72,19 +77,19 @@ class FitnessApp(App):
     def create_nav_bar(self):
         """Создает нижние кнопки навигации"""
         from kivy.uix.gridlayout import GridLayout
-        nav = GridLayout(cols=2, size_hint_y=None, height=65)
+        nav = GridLayout(cols=2, size_hint_y=None, height=dp(64))
 
 
         self.btn_main = Button(
             text="Главная", 
             background_normal='', 
-            background_color=(0.12, 0.58, 0.95, 1) # Активный цвет
+            background_color=(0.12, 0.58, 0.95, 1)
         )
 
         self.btn_stats = Button(
             text="Графики", 
             background_normal='', 
-            background_color=(0.3, 0.3, 0.3, 1) # Темный цвет
+            background_color=(0.3, 0.3, 0.3, 1)
         )
         
         self.btn_main.bind(on_release=lambda x: self.change_tab(0))
