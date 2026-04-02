@@ -3,15 +3,19 @@
 title = FitnessTracker
 package.name = FitnessTracker
 package.domain = org.test
-version = 0.0.2
+version = 0.0.3
 
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 source.exclude_exts = spec,db
 
+icon.filename = %(source.dir)s/images/icons8-кеды-60.png
+presplash.filename = %(source.dir)s/images/filename.png
+android.presplash_color = #FFFFFF
+
 log_level = 2
 
-android.api = 28
+android.api = 30
 android.minapi = 21
 android.ndk = 25b
 android.archs = arm64-v8a

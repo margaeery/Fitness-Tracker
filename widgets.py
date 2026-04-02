@@ -37,7 +37,7 @@ class SettingsPopup(Popup):
     def __init__(self, current_data, **kwargs):
         super().__init__(**kwargs)
         self.title = "Настройки"
-        self.size_hint = (0.9, 0.5)
+        self.size_hint = (0.9, 0.55)
         weight, height, goal = current_data
         self.ids.weight_input.text = str(weight)
         self.ids.height_input.text = str(height)
@@ -108,8 +108,8 @@ class ActivityChart(Widget):
 
     def on_touch_down(self, touch):
         if self.collide_point(*touch.pos):
-            padding_left = 60
-            chart_width = self.width - 80
+            padding_left = 70
+            chart_width = self.width - 90
             if not self.data: return False
             
             bar_count = len(self.data)
@@ -130,10 +130,10 @@ class ActivityChart(Widget):
         if not self.data: return
 
         with self.canvas:
-            padding_left, padding_bottom = 60, 50
-            chart_width, chart_height = self.width - 80, self.height - 100
+            padding_left, padding_bottom = 70, 60
+            chart_width, chart_height = self.width - 90, self.height - 110
             
-            # --- АДАПТИВНЫЙ РАСЧЕТ МАКСИМУМА ---
+            #АДАПТИВНЫЙ РАСЧЕТ МАКСИМУМА
             actual_max = max(self.data) if self.data else 0
             
             if self.data_type == 'steps':
@@ -156,7 +156,7 @@ class ActivityChart(Widget):
                 # Для дистанции показываем 1 знак после запятой
                 step_label = f"{val_num:.1f}" if self.data_type == 'distance' else str(int(val_num))
                 
-                lbl = CoreLabel(text=step_label, font_size=10)
+                lbl = CoreLabel(text=step_label, font_size=20)
                 lbl.refresh()
                 Color(0.4, 0.4, 0.4, 1)
                 Rectangle(
@@ -193,7 +193,7 @@ class ActivityChart(Widget):
 
                 if draw_lbl:
                     txt = self.labels[i].split('.')[0] if self.mode == 'month' else self.labels[i]
-                    lbl_x = CoreLabel(text=txt, font_size=11)
+                    lbl_x = CoreLabel(text=txt, font_size=20)
                     lbl_x.refresh()
                     Color(0.4, 0.4, 0.4, 1)
                     Rectangle(
@@ -201,11 +201,11 @@ class ActivityChart(Widget):
                         size=lbl_x.texture.size, texture=lbl_x.texture
                     )
 
-            # РИСУЕМ ТУЛТИП (ПОДСКАЗКУ)
+            # РИСУЕМ ПОДСКАЗКУ
             if selected_info:
                 sx, sy, sh, sval = selected_info
                 tip_text = f"{sval:.2f}" if self.data_type == 'distance' else str(int(sval))
-                tip_lbl = CoreLabel(text=tip_text, font_size=13, bold=True)
+                tip_lbl = CoreLabel(text=tip_text, font_size=20, bold=True)
                 tip_lbl.refresh()
                 
                 tw, th = tip_lbl.texture.size[0] + 12, tip_lbl.texture.size[1] + 8
@@ -284,3 +284,4 @@ class StatsScreen(Screen):
             
             self.ids.chart_label.text = f"{y}" 
             self.ids.chart.labels, self.ids.chart.data = labels, final_data
+
