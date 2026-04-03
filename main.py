@@ -3,22 +3,52 @@
 # Config.set('graphics', 'width', '360')
 # Config.set('graphics', 'height', '800')
 # #Config.set('graphics', 'resizable', False)
+
+import logging
+import os
+
 from kivy.app import App
 from kivy.uix.screenmanager import ScreenManager, Screen, NoTransition
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.carousel import Carousel
 from kivy.uix.button import Button
 from kivy.metrics import dp, sp
-import os
+from kivy.clock import Clock
 
 # Импортируем классы и БД
 from database import FitnessDB
 from widgets import SetupScreen, MainScreen, StatsScreen
+from step_counter import StepCounter, ANDROID
+
+# Настройка логирования
+def setup_logging():
+    """Настраивает логирование приложения.
+    На Android вывод попадает в logcat (adb logcat -s python)."""
+    root_logger = logging.getLogger('FitnessTracker')
+    root_logger.setLevel(logging.DEBUG)
+
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.DEBUG)
+    formatter = logging.Formatter(
+        '%(asctime)s [%(name)s] %(levelname)s: %(message)s',
+        datefmt='%H:%M:%S',
+    )
+    handler.setFormatter(formatter)
+    root_logger.addHandler(handler)
+    return root_logger
+
+logger = setup_logging()
+
 
 class FitnessApp(App):
     def build(self):
+        logger.info("═══ Запуск FitnessApp ═══")
+
         # Инициализация базы данных
         self.db = FitnessDB()
+
+        # Инициализация счётчика шагов (датчик подключается позже)
+        self.step_counter = StepCounter(self.db)
 
         # Проверяем, настроен ли профиль пользователя
         metrics = self.db.get_latest_metrics()
@@ -28,20 +58,28 @@ class FitnessApp(App):
 
         if not metrics:
             # Если данных нет, добавляем экран первичной настройки
+            logger.info("Профиль не настроен — показываем экран настройки")
             setup_screen = SetupScreen(name='setup')
             self.root_manager.add_widget(setup_screen)
         else:
             # Если данные есть, создаем основной интерфейс с навигацией
+            logger.info(f"Профиль найден: weight={metrics[0]}, "
+                        f"height={metrics[1]}, goal={metrics[2]}")
             main_layout = self.create_main_layout()
             self.root_manager.add_widget(main_layout)
+            # Запускаем датчик шагов (запрос разрешений на Android)
+            self._init_step_counter()
 
         return self.root_manager
 
     def restart_with_nav(self):
         """Метод для переключения с экрана настройки на главный экран"""
+        logger.info("Переключение на главный экран (после настройки профиля)")
         self.root_manager.clear_widgets()
         self.root_manager.add_widget(self.create_main_layout())
         self.root_manager.current = 'nav_screen'
+        # Запускаем датчик после первичной настройки
+        self._init_step_counter()
 
     def create_main_layout(self):
         """Создает экран с Carousel (слайдами) и нижней панелью навигации"""
@@ -116,9 +154,69 @@ class FitnessApp(App):
             self.stats_screen.on_enter() # Обновляем графики при переходе
 
     def on_stop(self):
-        """Закрываем базу данных при выходе из приложения"""
+        """Закрываем базу данных и датчик при выходе из приложения"""
+        logger.info("═══ Остановка FitnessApp ═══")
+        if hasattr(self, 'step_counter'):
+            self.step_counter.stop()
         if hasattr(self, 'db'):
             self.db.close()
+
+    def on_pause(self):
+        """Приложение сворачивается — приостанавливаем датчик."""
+        logger.info("App → on_pause")
+        if hasattr(self, 'step_counter'):
+            self.step_counter.stop()
+        return True  # Обязательно True, иначе Android убьёт процесс
+
+    def on_resume(self):
+        """Приложение возвращается — перезапускаем датчик и обновляем UI."""
+        logger.info("App → on_resume")
+        self._start_step_counter()
+        if hasattr(self, 'main_screen'):
+            self.main_screen.on_enter()
+
+    # Датчик шагов
+
+    def _init_step_counter(self):
+        """Запрашивает разрешение ACTIVITY_RECOGNITION и запускает датчик."""
+        if not ANDROID:
+            logger.info("Не Android — датчик шагов не запускается")
+            return
+
+        try:
+            from android.permissions import request_permissions, check_permission
+            perm = 'android.permission.ACTIVITY_RECOGNITION'
+
+            if check_permission(perm):
+                logger.info("Разрешение ACTIVITY_RECOGNITION уже получено")
+                self._start_step_counter()
+            else:
+                logger.info("Запрашиваем разрешение ACTIVITY_RECOGNITION")
+                request_permissions([perm], self._on_permission_result)
+        except Exception as e:
+            logger.error(f"Ошибка запроса разрешений: {e}", exc_info=True)
+            # На старых API разрешение может быть не нужно — пробуем запустить
+            self._start_step_counter()
+
+    def _on_permission_result(self, permissions, grants):
+        """Callback после ответа пользователя на запрос разрешений."""
+        if grants and all(grants):
+            logger.info("Разрешение ACTIVITY_RECOGNITION получено")
+            self._start_step_counter()
+        else:
+            logger.warning("Разрешение ACTIVITY_RECOGNITION отклонено — "
+                           "подсчёт шагов через датчик невозможен")
+
+    def _start_step_counter(self):
+        """Регистрирует датчик шагов."""
+        if hasattr(self, 'step_counter') and not self.step_counter.is_running:
+            self.step_counter.start(ui_callback=self._on_steps_update)
+
+    def _on_steps_update(self, steps):
+        """Callback от датчика — обновляем UI главного экрана."""
+        if hasattr(self, 'main_screen') and hasattr(self, 'carousel'):
+            if self.carousel.index == 0:
+                self.main_screen.on_enter()
 
 if __name__ == '__main__':
     FitnessApp().run()

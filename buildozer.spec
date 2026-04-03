@@ -21,11 +21,11 @@ android.ndk = 25b
 android.archs = arm64-v8a
 android.accept_sdk_license = True
 
-requirements = python3,kivy
+requirements = python3,kivy,android
 
 orientation = portrait
 
-android.permissions = WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE
+android.permissions = ACTIVITY_RECOGNITION,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE
 
 osx.python_version = 3
 osx.kivy_version = 2.2.0

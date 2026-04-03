@@ -14,6 +14,9 @@ from calculator import FitnessCalculator
 from datetime import datetime, timedelta
 import calendar
 import os
+import logging
+
+logger = logging.getLogger('FitnessTracker.UI')
 
 MONTHS_RU = {
     1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
@@ -64,8 +67,10 @@ class SetupScreen(Screen):
             if w <= 0 or h <= 0 or g <= 0: raise ValueError
             app = App.get_running_app()
             app.db.save_user_metrics(w, h, g)
+            logger.info(f"Профиль сохранён: weight={w}, height={h}, goal={g}")
             app.restart_with_nav()
         except ValueError:
+            logger.warning("Ошибка ввода профиля")
             ErrorPopup(message="Введите корректные числа!").open()
 
 class MainScreen(Screen):
@@ -85,6 +90,10 @@ class MainScreen(Screen):
             self.ids.kcal_label.text = f"{kcal} ккал"
             percent = min(steps / goal, 1.0) if goal > 0 else 0
             self.progress_angle = percent * 360
+            logger.debug(
+                f"MainScreen обновлён: steps={steps}, dist={dist}, "
+                f"kcal={kcal}, progress={percent:.0%}"
+            )
 
     def open_settings(self):
         app = App.get_running_app()
@@ -246,6 +255,11 @@ class StatsScreen(Screen):
         # Синхронизируем свойства виджета графика
         self.ids.chart.mode = self.current_mode
         self.ids.chart.data_type = self.data_type
+
+        logger.debug(
+            f"StatsScreen.update_stats: mode={self.current_mode}, "
+            f"type={self.data_type}, offset={self.offset}"
+        )
         
         if self.current_mode == 'week':
             start = today - timedelta(days=today.weekday()) - timedelta(weeks=self.offset)
