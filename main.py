@@ -18,7 +18,14 @@ from kivy.clock import Clock
 # Импортируем классы и БД
 from database import FitnessDB
 from widgets import SetupScreen, MainScreen, StatsScreen
-from step_counter import StepCounter, ANDROID
+
+# Проверка платформы
+ANDROID = False
+try:
+    from jnius import autoclass
+    ANDROID = True
+except ImportError:
+    pass
 
 # Настройка логирования
 def setup_logging():
@@ -46,9 +53,7 @@ class FitnessApp(App):
 
         # Инициализация базы данных
         self.db = FitnessDB()
-
-        # Инициализация счётчика шагов (датчик подключается позже)
-        self.step_counter = StepCounter(self.db)
+        self._refresh_event = None
 
         # Проверяем, настроен ли профиль пользователя
         metrics = self.db.get_latest_metrics()
@@ -67,8 +72,8 @@ class FitnessApp(App):
                         f"height={metrics[1]}, goal={metrics[2]}")
             main_layout = self.create_main_layout()
             self.root_manager.add_widget(main_layout)
-            # Запускаем датчик шагов (запрос разрешений на Android)
-            self._init_step_counter()
+            # Запрашиваем разрешения и стартуем фоновый сервис
+            self._request_permissions_and_start_service()
 
         return self.root_manager
 
@@ -78,8 +83,8 @@ class FitnessApp(App):
         self.root_manager.clear_widgets()
         self.root_manager.add_widget(self.create_main_layout())
         self.root_manager.current = 'nav_screen'
-        # Запускаем датчик после первичной настройки
-        self._init_step_counter()
+        # Запрашиваем разрешения и стартуем фоновый сервис
+        self._request_permissions_and_start_service()
 
     def create_main_layout(self):
         """Создает экран с Carousel (слайдами) и нижней панелью навигации"""
@@ -154,66 +159,103 @@ class FitnessApp(App):
             self.stats_screen.on_enter() # Обновляем графики при переходе
 
     def on_stop(self):
-        """Закрываем базу данных и датчик при выходе из приложения"""
+        """Закрываем базу данных при выходе. Сервис продолжает работать."""
         logger.info("═══ Остановка FitnessApp ═══")
-        if hasattr(self, 'step_counter'):
-            self.step_counter.stop()
+        self._stop_ui_refresh()
         if hasattr(self, 'db'):
             self.db.close()
 
     def on_pause(self):
-        """Приложение сворачивается — приостанавливаем датчик."""
+        """Приложение сворачивается — сервис продолжает считать шаги."""
         logger.info("App → on_pause")
-        if hasattr(self, 'step_counter'):
-            self.step_counter.stop()
+        self._stop_ui_refresh()
         return True  # Обязательно True, иначе Android убьёт процесс
 
     def on_resume(self):
-        """Приложение возвращается — перезапускаем датчик и обновляем UI."""
+        """Приложение возвращается — обновляем UI из БД."""
         logger.info("App → on_resume")
-        self._start_step_counter()
+        self._start_ui_refresh()
         if hasattr(self, 'main_screen'):
             self.main_screen.on_enter()
 
-    # Датчик шагов
+    # ─── Разрешения и запуск сервиса ─────────────────────────────────
 
-    def _init_step_counter(self):
-        """Запрашивает разрешение ACTIVITY_RECOGNITION и запускает датчик."""
+    def _request_permissions_and_start_service(self):
+        """Запрашивает все необходимые разрешения, затем запускает сервис."""
         if not ANDROID:
-            logger.info("Не Android — датчик шагов не запускается")
+            logger.info("Не Android — сервис не запускается")
             return
 
         try:
             from android.permissions import request_permissions, check_permission
-            perm = 'android.permission.ACTIVITY_RECOGNITION'
 
-            if check_permission(perm):
-                logger.info("Разрешение ACTIVITY_RECOGNITION уже получено")
-                self._start_step_counter()
+            perms_needed = []
+
+            perm_activity = 'android.permission.ACTIVITY_RECOGNITION'
+            if not check_permission(perm_activity):
+                perms_needed.append(perm_activity)
+
+            perm_notif = 'android.permission.POST_NOTIFICATIONS'
+            if not check_permission(perm_notif):
+                perms_needed.append(perm_notif)
+
+            if perms_needed:
+                logger.info(f"Запрашиваем разрешения: {perms_needed}")
+                request_permissions(perms_needed, self._on_permissions_result)
             else:
-                logger.info("Запрашиваем разрешение ACTIVITY_RECOGNITION")
-                request_permissions([perm], self._on_permission_result)
+                logger.info("Все разрешения уже получены")
+                self._start_service()
+
         except Exception as e:
             logger.error(f"Ошибка запроса разрешений: {e}", exc_info=True)
-            # На старых API разрешение может быть не нужно — пробуем запустить
-            self._start_step_counter()
+            self._start_service()
 
-    def _on_permission_result(self, permissions, grants):
-        """Callback после ответа пользователя на запрос разрешений."""
-        if grants and all(grants):
-            logger.info("Разрешение ACTIVITY_RECOGNITION получено")
-            self._start_step_counter()
-        else:
-            logger.warning("Разрешение ACTIVITY_RECOGNITION отклонено — "
-                           "подсчёт шагов через датчик невозможен")
+    def _on_permissions_result(self, permissions, grants):
+        """Callback после ответа пользователя на все запросы разрешений."""
+        for perm, grant in zip(permissions, grants):
+            name = perm.split('.')[-1]
+            if grant:
+                logger.info(f"Разрешение {name} получено")
+            else:
+                logger.warning(f"Разрешение {name} отклонено")
+        # Запускаем сервис в любом случае —
+        # на старых API разрешения могут быть не нужны
+        self._start_service()
 
-    def _start_step_counter(self):
-        """Регистрирует датчик шагов."""
-        if hasattr(self, 'step_counter') and not self.step_counter.is_running:
-            self.step_counter.start(ui_callback=self._on_steps_update)
+    def _start_service(self):
+        """Запускает фоновый сервис подсчёта шагов."""
+        if not ANDROID:
+            return
+        try:
+            from jnius import autoclass as _ac
+            activity = _ac('org.kivy.android.PythonActivity').mActivity
+            context = activity.getApplicationContext()
+            # Имя Java-класса сервиса (генерируется buildozer/p4a)
+            service_name = f'{context.getPackageName()}.ServiceStepservice'
+            service_class = _ac(service_name)
+            service_class.start(activity, '')
+            logger.info(f"Сервис запущен: {service_name}")
+            # Начинаем обновлять UI из БД
+            self._start_ui_refresh()
+        except Exception as e:
+            logger.error(f"Ошибка запуска сервиса: {e}", exc_info=True)
 
-    def _on_steps_update(self, steps):
-        """Callback от датчика — обновляем UI главного экрана."""
+    # ─── Периодическое обновление UI ─────────────────────────────────
+
+    def _start_ui_refresh(self):
+        """Запускает таймер обновления UI (каждые 10 секунд)."""
+        self._stop_ui_refresh()
+        self._refresh_event = Clock.schedule_interval(self._refresh_ui, 10)
+        logger.debug("UI refresh timer запущен")
+
+    def _stop_ui_refresh(self):
+        """Останавливает таймер обновления UI."""
+        if hasattr(self, '_refresh_event') and self._refresh_event:
+            self._refresh_event.cancel()
+            self._refresh_event = None
+
+    def _refresh_ui(self, dt):
+        """Перечитывает данные из БД и обновляет главный экран."""
         if hasattr(self, 'main_screen') and hasattr(self, 'carousel'):
             if self.carousel.index == 0:
                 self.main_screen.on_enter()

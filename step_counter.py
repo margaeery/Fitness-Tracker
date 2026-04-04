@@ -25,7 +25,7 @@ from calculator import FitnessCalculator
 
 logger = logging.getLogger('FitnessTracker.StepCounter')
 
-# ─── Проверка платформы ──────────────────────────────────────────────
+# Проверка платформы
 ANDROID = False
 try:
     from jnius import autoclass, PythonJavaClass, java_method
@@ -39,7 +39,7 @@ except ImportError:
     logger.info("Платформа Desktop — датчики недоступны")
 
 
-# ─── Java-обёртка SensorEventListener ────────────────────────────────
+# Java-обёртка SensorEventListener
 if ANDROID:
     class _SensorListener(PythonJavaClass):
         """Реализация android.hardware.SensorEventListener через pyjnius."""
@@ -62,7 +62,7 @@ if ANDROID:
             logger.debug(f"Точность датчика изменилась: {accuracy}")
 
 
-# ─── Основной класс ─────────────────────────────────────────────────
+# Основной класс
 class StepCounter:
     """Подсчёт шагов через аппаратный датчик TYPE_STEP_COUNTER."""
 
@@ -77,7 +77,7 @@ class StepCounter:
         self._goal_reached_today = False
         logger.info("StepCounter создан")
 
-    # ─── Публичные методы ────────────────────────────────────────────
+    # Публичные методы
 
     def start(self, ui_callback=None):
         """
@@ -138,7 +138,7 @@ class StepCounter:
                 logger.error(f"Ошибка остановки датчика: {e}")
         self.is_running = False
 
-    # ─── Внутренняя логика ───────────────────────────────────────────
+    # Внутренняя логика
 
     def _on_sensor_event(self, sensor_value):
         """Вызывается из Java-потока — безопасно переключаемся в Kivy."""
@@ -157,7 +157,7 @@ class StepCounter:
         baseline = self.db.get_sensor_baseline(today)
         current_steps = self.db.get_today_steps()
 
-        # ── Первое чтение за день ────────────────────────────────────
+        # Первое чтение за день
         if baseline is None:
             # baseline = sensor − уже накопленные шаги (из ручного ввода и т.д.)
             new_baseline = sensor_value - current_steps
@@ -168,7 +168,7 @@ class StepCounter:
             )
             return
 
-        # ── Перезагрузка устройства (датчик сбросился) ───────────────
+        #  Перезагрузка устройства (датчик сбросился)
         if sensor_value < baseline:
             new_baseline = sensor_value - current_steps
             self.db.save_sensor_baseline(today, new_baseline)
@@ -179,7 +179,7 @@ class StepCounter:
             )
             return
 
-        # ── Обычная работа: вычисляем шаги ───────────────────────────
+        # Обычная работа: вычисляем шаги
         new_steps = sensor_value - baseline
 
         if new_steps == current_steps:
