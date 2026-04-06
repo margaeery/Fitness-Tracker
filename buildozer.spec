@@ -3,7 +3,7 @@
 title = FitnessTracker
 package.name = FitnessTracker
 package.domain = org.test
-version = 0.0.6
+version = 0.0.7
 
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas

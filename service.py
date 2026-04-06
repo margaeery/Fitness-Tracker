@@ -6,7 +6,7 @@
 - В фоне (приложение свёрнуто/закрыто): проверяет датчик каждые 60 сек,
   пишет в БД каждые 10 мин — экономия батареи
 - Когда приложение на экране (foreground): проверяет датчик каждые 15 сек,
-  пишет в БД каждые 60 сек — быстрое обновление UI
+  пишет в БД каждые 15 сек — быстрое обновление UI
 - Обрабатывает смену дня (полночь): сохраняет данные за прошлый день,
   сбрасывает baseline для нового
 - Отправляет push-уведомление через plyer при достижении цели шагов
@@ -270,6 +270,34 @@ def main():
     service = PythonService.mService
     service.setAutoRestartService(True)
 
+    # Меняем текст постоянного уведомления сервиса
+    try:
+        NotificationBuilder = autoclass('android.app.Notification$Builder')
+        NotificationManager = autoclass('android.app.NotificationManager')
+        NotificationChannel = autoclass('android.app.NotificationChannel')
+
+        context = service.getApplicationContext()
+        nm = context.getSystemService(Context.NOTIFICATION_SERVICE)
+
+        channel_id = "fitness_service"
+        channel = NotificationChannel(
+            channel_id, "Фоновый сервис",
+            NotificationManager.IMPORTANCE_LOW,
+        )
+        channel.setDescription("Подсчёт шагов в фоновом режиме")
+        nm.createNotificationChannel(channel)
+
+        builder = NotificationBuilder(context, channel_id)
+        builder.setContentTitle("FitnessTracker")
+        builder.setContentText("Работа в фоновом режиме")
+        builder.setSmallIcon(context.getApplicationInfo().icon)
+        builder.setOngoing(True)
+
+        service.startForeground(1, builder.build())
+        logger.info("Уведомление сервиса обновлено")
+    except Exception as e:
+        logger.warning(f"Не удалось обновить уведомление сервиса: {e}")
+
     # WakeLock — не даём CPU засыпать, иначе датчик не читается
     pm = service.getSystemService(Context.POWER_SERVICE)
     wake_lock = pm.newWakeLock(
@@ -309,7 +337,7 @@ def main():
 
     logger.info("Датчик шагов зарегистрирован в сервисе")
 
-    # ─── Интервалы для двух режимов ──────────────────────────────────
+    # Интервалы для двух режимов
     # Background (приложение свёрнуто/закрыто): экономим батарею
     BG_CHECK  = 60    # проверка датчика каждые 60 сек
     BG_SAVE   = 600   # запись в БД каждые 10 мин
@@ -327,7 +355,7 @@ def main():
 
     try:
         while True:
-            # ── Проверяем режим (foreground / background) ────────────
+            # Проверяем режим (foreground / background)
             app_active = os.path.exists(FOREGROUND_FLAG)
             new_mode = 'foreground' if app_active else 'background'
 
@@ -343,21 +371,21 @@ def main():
                 logger.info(f"Режим → {current_mode} "
                             f"(check={check_interval}s, save={save_interval}s)")
 
-            # ── Проверяем смену дня ──────────────────────────────────
+            # Проверяем смену дня
             state.handle_midnight()
 
-            # ── Проверяем изменение цели ──────────────────────────────
+            # Проверяем изменение цели 
             state.check_goal_change()
 
-            # ── Обрабатываем данные датчика ───────────────────────────
+            # Обрабатываем данные датчика 
             if listener.last_sensor_value is not None:
                 state.process_sensor(listener.last_sensor_value)
 
-            # ── Периодическая запись в БД ─────────────────────────────
+            #  Периодическая запись в БД  
             if time.time() - state.last_save_time >= save_interval:
                 state.save_to_db()
 
-            # ── Ждём до следующей проверки ────────────────────────────
+            #  Ждём до следующей проверки  
             time.sleep(check_interval)
 
     except Exception as e:

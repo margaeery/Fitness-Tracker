@@ -142,7 +142,7 @@ class FitnessDB:
             
         return labels, res_data
 
-    # ─── Методы для датчика шагов ─────────────────────────────────────
+    # Методы для датчика шагов
 
     def get_sensor_baseline(self, date):
         """Возвращает baseline датчика для указанной даты или None."""
