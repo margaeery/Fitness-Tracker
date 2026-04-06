@@ -3,11 +3,18 @@
 
 Работает в отдельном процессе, независимо от UI.
 - Регистрирует аппаратный датчик TYPE_STEP_COUNTER через HandlerThread
-- Каждые 30 секунд проверяет новые данные датчика
-- Сохраняет данные в SQLite каждые 2 минуты (или при достижении цели)
+- В фоне (приложение свёрнуто/закрыто): проверяет датчик каждые 60 сек,
+  пишет в БД каждые 10 мин — экономия батареи
+- Когда приложение на экране (foreground): проверяет датчик каждые 15 сек,
+  пишет в БД каждые 60 сек — быстрое обновление UI
 - Обрабатывает смену дня (полночь): сохраняет данные за прошлый день,
   сбрасывает baseline для нового
 - Отправляет push-уведомление через plyer при достижении цели шагов
+- setAutoRestartService(True) — Android перезапускает сервис при убийстве
+
+Коммуникация с приложением:
+  Приложение создаёт/удаляет файл-флаг «.app_foreground» — сервис
+  читает его и переключает режим (foreground/background).
 """
 
 import os
@@ -21,8 +28,11 @@ SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
 if SERVICE_DIR not in sys.path:
     sys.path.insert(0, SERVICE_DIR)
 
-from database import FitnessDB
+from database import FitnessDB, DB_PATH
 from calculator import FitnessCalculator
+
+# Файл-флаг: приложение на экране
+FOREGROUND_FLAG = os.path.join(DB_PATH, '.app_foreground')
 
 # Логирование
 logging.basicConfig(
@@ -42,6 +52,7 @@ try:
     SensorManager = autoclass('android.hardware.SensorManager')
     HandlerThread = autoclass('android.os.HandlerThread')
     Handler       = autoclass('android.os.Handler')
+    PowerManager  = autoclass('android.os.PowerManager')
 except ImportError:
     logger.error("Service запущен не на Android — выход")
     sys.exit(1)
@@ -236,6 +247,20 @@ class ServiceState:
         if metrics:
             self.weight, self.height, self.goal = metrics
 
+    def check_goal_change(self):
+        """Проверяет, изменилась ли цель. Если да — сбрасывает флаг уведомления."""
+        metrics = self.db.get_latest_metrics()
+        if not metrics:
+            return
+        new_goal = metrics[2]
+        if new_goal != self.goal:
+            old_goal = self.goal
+            self.weight, self.height, self.goal = metrics
+            # Сбрасываем флаг уведомления, чтобы оно могло прийти повторно
+            self.goal_notified = False
+            logger.info(f"Цель изменена: {old_goal} → {self.goal}, "
+                        f"уведомление сброшено")
+
 
 # Точка входа сервиса  
 def main():
@@ -244,6 +269,13 @@ def main():
     # Предотвращаем убийство сервиса Android
     service = PythonService.mService
     service.setAutoRestartService(True)
+
+    # WakeLock — не даём CPU засыпать, иначе датчик не читается
+    pm = service.getSystemService(Context.POWER_SERVICE)
+    wake_lock = pm.newWakeLock(
+        PowerManager.PARTIAL_WAKE_LOCK, 'FitnessTracker::StepService'
+    )
+    wake_lock.acquire()
 
     # База данных
     db = FitnessDB()
@@ -277,24 +309,56 @@ def main():
 
     logger.info("Датчик шагов зарегистрирован в сервисе")
 
-    # Основной цикл
-    SAVE_INTERVAL  = 120   # Запись в БД каждые 2 минуты
-    CHECK_INTERVAL = 30    # Проверка датчика каждые 30 секунд
+    # ─── Интервалы для двух режимов ──────────────────────────────────
+    # Background (приложение свёрнуто/закрыто): экономим батарею
+    BG_CHECK  = 60    # проверка датчика каждые 60 сек
+    BG_SAVE   = 600   # запись в БД каждые 10 мин
+
+    # Foreground (приложение на экране): быстрое обновление
+    FG_CHECK  = 15    # проверка датчика каждые 15 сек
+    FG_SAVE   = 15    # запись в БД каждые 15 сек (совпадает с check)
+
+    current_mode = 'background'
+    check_interval = BG_CHECK
+    save_interval  = BG_SAVE
+
+    logger.info(f"Начальный режим: {current_mode} "
+                f"(check={check_interval}s, save={save_interval}s)")
 
     try:
         while True:
-            time.sleep(CHECK_INTERVAL)
+            # ── Проверяем режим (foreground / background) ────────────
+            app_active = os.path.exists(FOREGROUND_FLAG)
+            new_mode = 'foreground' if app_active else 'background'
 
-            # Проверяем смену дня
+            if new_mode != current_mode:
+                # При смене режима — сразу сохраняем актуальные данные
+                state.dirty = True
+                state.save_to_db()
+                current_mode = new_mode
+                if current_mode == 'foreground':
+                    check_interval, save_interval = FG_CHECK, FG_SAVE
+                else:
+                    check_interval, save_interval = BG_CHECK, BG_SAVE
+                logger.info(f"Режим → {current_mode} "
+                            f"(check={check_interval}s, save={save_interval}s)")
+
+            # ── Проверяем смену дня ──────────────────────────────────
             state.handle_midnight()
 
-            # Обрабатываем данные датчика
+            # ── Проверяем изменение цели ──────────────────────────────
+            state.check_goal_change()
+
+            # ── Обрабатываем данные датчика ───────────────────────────
             if listener.last_sensor_value is not None:
                 state.process_sensor(listener.last_sensor_value)
 
-            # Периодическая запись в БД
-            if time.time() - state.last_save_time >= SAVE_INTERVAL:
+            # ── Периодическая запись в БД ─────────────────────────────
+            if time.time() - state.last_save_time >= save_interval:
                 state.save_to_db()
+
+            # ── Ждём до следующей проверки ────────────────────────────
+            time.sleep(check_interval)
 
     except Exception as e:
         logger.error(f"Ошибка сервиса: {e}", exc_info=True)
@@ -303,6 +367,8 @@ def main():
         state.dirty = True
         state.save_to_db()
         sm.unregisterListener(listener)
+        if wake_lock.isHeld():
+            wake_lock.release()
         ht.quit()
         db.close()
 

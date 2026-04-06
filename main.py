@@ -16,8 +16,12 @@ from kivy.metrics import dp, sp
 from kivy.clock import Clock
 
 # Импортируем классы и БД
-from database import FitnessDB
+from database import FitnessDB, DB_PATH
 from widgets import SetupScreen, MainScreen, StatsScreen
+
+# Файл-флаг для сигнализации сервису о том, что приложение на экране
+import os as _os
+FOREGROUND_FLAG = _os.path.join(DB_PATH, '.app_foreground')
 
 # Проверка платформы
 ANDROID = False
@@ -54,6 +58,7 @@ class FitnessApp(App):
         # Инициализация базы данных
         self.db = FitnessDB()
         self._refresh_event = None
+        self._service_started = False
 
         # Проверяем, настроен ли профиль пользователя
         metrics = self.db.get_latest_metrics()
@@ -161,6 +166,7 @@ class FitnessApp(App):
     def on_stop(self):
         """Закрываем базу данных при выходе. Сервис продолжает работать."""
         logger.info("═══ Остановка FitnessApp ═══")
+        self._set_foreground_flag(False)
         self._stop_ui_refresh()
         if hasattr(self, 'db'):
             self.db.close()
@@ -168,59 +174,178 @@ class FitnessApp(App):
     def on_pause(self):
         """Приложение сворачивается — сервис продолжает считать шаги."""
         logger.info("App → on_pause")
+        self._set_foreground_flag(False)
         self._stop_ui_refresh()
         return True  # Обязательно True, иначе Android убьёт процесс
 
     def on_resume(self):
-        """Приложение возвращается — обновляем UI из БД."""
+        """Приложение возвращается — обновляем UI или продвигаем цепочку разрешений."""
         logger.info("App → on_resume")
+
+        phase = getattr(self, '_perm_phase', None)
+        if phase in ('awaiting_activity', 'awaiting_notification'):
+            # Диалог разрешения закрылся — продвигаем цепочку
+            self._try_advance()
+            return
+        if phase == 'awaiting_battery':
+            # Системный диалог батареи закрылся — запускаем сервис
+            self._perm_phase = 'done'
+            Clock.schedule_once(lambda dt: self._start_service(), 0.3)
+            return
+
+        if not self._service_started:
+            return
+        self._set_foreground_flag(True)
         self._start_ui_refresh()
-        if hasattr(self, 'main_screen'):
-            self.main_screen.on_enter()
 
     # ─── Разрешения и запуск сервиса ─────────────────────────────────
 
     def _request_permissions_and_start_service(self):
-        """Запрашивает все необходимые разрешения, затем запускает сервис."""
+        """Запрашивает разрешения последовательно, затем запускает сервис.
+        Порядок: 1) шаги → 2) уведомления → 3) popup батареи → 4) системный запрос батареи."""
         if not ANDROID:
             logger.info("Не Android — сервис не запускается")
             return
 
+        self._perm_phase = 'start'
+        self._advancing = False
+        self._asked_perms = set()  # уже запрошенные — не спрашиваем повторно
+        self._advance_permissions()
+
+    def _try_advance(self):
+        """Безопасно продвигает цепочку. Защита от двойного вызова."""
+        if getattr(self, '_advancing', False):
+            logger.debug("_try_advance: уже в процессе, пропускаем")
+            return
+        Clock.schedule_once(lambda dt: self._advance_permissions(), 0.3)
+
+    def _advance_permissions(self):
+        """Проверяет какие разрешения нужны и запрашивает следующее."""
+        if getattr(self, '_advancing', False):
+            return
+        self._advancing = True
         try:
             from android.permissions import request_permissions, check_permission
 
-            perms_needed = []
-
+            # 1. ACTIVITY_RECOGNITION
             perm_activity = 'android.permission.ACTIVITY_RECOGNITION'
-            if not check_permission(perm_activity):
-                perms_needed.append(perm_activity)
+            if not check_permission(perm_activity) and perm_activity not in self._asked_perms:
+                logger.info("Запрашиваем ACTIVITY_RECOGNITION")
+                self._perm_phase = 'awaiting_activity'
+                self._asked_perms.add(perm_activity)
+                self._advancing = False
+                request_permissions([perm_activity], self._on_perm_result)
+                return
 
+            # 2. POST_NOTIFICATIONS
             perm_notif = 'android.permission.POST_NOTIFICATIONS'
-            if not check_permission(perm_notif):
-                perms_needed.append(perm_notif)
+            if not check_permission(perm_notif) and perm_notif not in self._asked_perms:
+                logger.info("Запрашиваем POST_NOTIFICATIONS")
+                self._perm_phase = 'awaiting_notification'
+                self._asked_perms.add(perm_notif)
+                self._advancing = False
+                request_permissions([perm_notif], self._on_perm_result)
+                return
 
-            if perms_needed:
-                logger.info(f"Запрашиваем разрешения: {perms_needed}")
-                request_permissions(perms_needed, self._on_permissions_result)
-            else:
-                logger.info("Все разрешения уже получены")
-                self._start_service()
+            # 3. Все runtime-разрешения обработаны — переходим к батарее
+            logger.info("Runtime-разрешения обработаны")
+            self._perm_phase = 'battery'
+            self._advancing = False
+            self._request_battery_and_start()
 
         except Exception as e:
             logger.error(f"Ошибка запроса разрешений: {e}", exc_info=True)
+            self._perm_phase = 'done'
+            self._advancing = False
             self._start_service()
 
-    def _on_permissions_result(self, permissions, grants):
-        """Callback после ответа пользователя на все запросы разрешений."""
+    def _on_perm_result(self, permissions, grants):
+        """Callback от Android. Логирует + продвигает цепочку."""
         for perm, grant in zip(permissions, grants):
             name = perm.split('.')[-1]
-            if grant:
-                logger.info(f"Разрешение {name} получено")
+            logger.info(f"{name}: {'получено' if grant else 'отклонено'}")
+        # Продвигаем цепочку из callback'а (если on_resume не сделал этого)
+        self._try_advance()
+
+    def _request_battery_and_start(self):
+        """Показывает предупреждение об оптимизации батареи, затем запускает сервис."""
+        if not ANDROID:
+            self._start_service()
+            return
+
+        try:
+            from jnius import autoclass as _ac
+            context = _ac('org.kivy.android.PythonActivity').mActivity.getApplicationContext()
+            pm = context.getSystemService('power')
+            pkg = context.getPackageName()
+
+            if not pm.isIgnoringBatteryOptimizations(pkg):
+                self._show_battery_popup()
             else:
-                logger.warning(f"Разрешение {name} отклонено")
-        # Запускаем сервис в любом случае —
-        # на старых API разрешения могут быть не нужны
-        self._start_service()
+                logger.debug("Оптимизация батареи уже отключена")
+                self._start_service()
+        except Exception as e:
+            logger.warning(f"Проверка оптимизации батареи: {e}")
+            self._start_service()
+
+    def _show_battery_popup(self):
+        """Показывает popup с объяснением зачем отключать оптимизацию батареи."""
+        from kivy.uix.popup import Popup
+        from kivy.uix.label import Label
+        from kivy.uix.button import Button as KButton
+        from kivy.uix.boxlayout import BoxLayout as BL
+
+        content = BL(orientation='vertical', padding=dp(10), spacing=dp(10))
+        content.add_widget(Label(
+            text='Для подсчёта шагов в фоновом режиме\n'
+                 '(при свёрнутом или закрытом приложении)\n'
+                 'необходимо снять ограничения на\n'
+                 'использование батареи.\n\n'
+                 'Нажмите «Разрешить» в следующем окне.',
+            halign='center',
+            valign='middle',
+        ))
+        btn = KButton(text='Понятно', size_hint_y=None, height=dp(48))
+        content.add_widget(btn)
+
+        popup = Popup(
+            title='Работа в фоновом режиме',
+            content=content,
+            size_hint=(0.85, 0.45),
+            auto_dismiss=False,
+        )
+
+        def _on_ok(instance):
+            popup.dismiss()
+            self._do_battery_exemption()
+
+        btn.bind(on_release=_on_ok)
+        popup.open()
+
+    def _do_battery_exemption(self):
+        """Запрашивает системное исключение из оптимизации батареи."""
+        try:
+            from jnius import autoclass as _ac
+            Settings = _ac('android.provider.Settings')
+            Intent = _ac('android.content.Intent')
+            Uri = _ac('android.net.Uri')
+
+            activity = _ac('org.kivy.android.PythonActivity').mActivity
+            pkg = activity.getApplicationContext().getPackageName()
+
+            intent = Intent(
+                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+            )
+            intent.setData(Uri.parse(f'package:{pkg}'))
+            # on_resume вызовет _start_service когда диалог закроется
+            self._perm_phase = 'awaiting_battery'
+            activity.startActivity(intent)
+            logger.info("Запрошено исключение из оптимизации батареи")
+        except Exception as e:
+            logger.warning(f"Не удалось запросить отключение оптимизации: {e}")
+            # Если не удалось открыть диалог — запускаем сервис напрямую
+            self._perm_phase = 'done'
+            self._start_service()
 
     def _start_service(self):
         """Запускает фоновый сервис подсчёта шагов."""
@@ -230,11 +355,15 @@ class FitnessApp(App):
             from jnius import autoclass as _ac
             activity = _ac('org.kivy.android.PythonActivity').mActivity
             context = activity.getApplicationContext()
+
             # Имя Java-класса сервиса (генерируется buildozer/p4a)
             service_name = f'{context.getPackageName()}.ServiceStepservice'
             service_class = _ac(service_name)
             service_class.start(activity, '')
+            self._service_started = True
             logger.info(f"Сервис запущен: {service_name}")
+            # Сигнализируем сервису: приложение на экране
+            self._set_foreground_flag(True)
             # Начинаем обновлять UI из БД
             self._start_ui_refresh()
         except Exception as e:
@@ -243,16 +372,34 @@ class FitnessApp(App):
     # ─── Периодическое обновление UI ─────────────────────────────────
 
     def _start_ui_refresh(self):
-        """Запускает таймер обновления UI (каждые 10 секунд)."""
+        """Запускает таймер обновления UI (каждые 30 секунд)."""
         self._stop_ui_refresh()
-        self._refresh_event = Clock.schedule_interval(self._refresh_ui, 10)
-        logger.debug("UI refresh timer запущен")
+        # Немедленное обновление при заходе
+        if hasattr(self, 'main_screen'):
+            self.main_screen.on_enter()
+            logger.debug("Экран обновлён сразу")
+        self._refresh_event = Clock.schedule_interval(self._refresh_ui, 30)
+        logger.debug("UI refresh timer запущен (30s)")
 
     def _stop_ui_refresh(self):
         """Останавливает таймер обновления UI."""
         if hasattr(self, '_refresh_event') and self._refresh_event:
             self._refresh_event.cancel()
             self._refresh_event = None
+
+    def _set_foreground_flag(self, active):
+        """Создаёт/удаляет файл-флаг для сигнализации сервису."""
+        try:
+            if active:
+                with open(FOREGROUND_FLAG, 'w') as f:
+                    f.write('1')
+                logger.debug("Foreground flag → ON")
+            else:
+                if _os.path.exists(FOREGROUND_FLAG):
+                    _os.remove(FOREGROUND_FLAG)
+                logger.debug("Foreground flag → OFF")
+        except Exception as e:
+            logger.error(f"Ошибка foreground flag: {e}")
 
     def _refresh_ui(self, dt):
         """Перечитывает данные из БД и обновляет главный экран."""

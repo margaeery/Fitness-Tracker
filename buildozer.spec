@@ -3,7 +3,7 @@
 title = FitnessTracker
 package.name = FitnessTracker
 package.domain = org.test
-version = 0.0.5
+version = 0.0.6
 
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
@@ -25,7 +25,7 @@ requirements = python3,kivy,android,plyer
 
 orientation = portrait
 
-android.permissions = ACTIVITY_RECOGNITION,POST_NOTIFICATIONS,FOREGROUND_SERVICE,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE
+android.permissions = ACTIVITY_RECOGNITION,POST_NOTIFICATIONS,FOREGROUND_SERVICE,WAKE_LOCK,REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE
 
 osx.python_version = 3
 osx.kivy_version = 2.2.0
@@ -37,3 +37,5 @@ p4a.branch = master
 allow_root = true
 
 services = Stepservice:service.py:foreground
+
+
