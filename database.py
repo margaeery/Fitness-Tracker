@@ -1,6 +1,9 @@
 import sqlite3
+import logging
 from datetime import datetime
 import os
+
+logger = logging.getLogger('FitnessTracker.Database')
 
 # Путь к данным приложения (работает на Android и desktop)
 try:
@@ -15,6 +18,7 @@ class FitnessDB:
         db_full_path = os.path.join(DB_PATH, db_name)
         os.makedirs(DB_PATH, exist_ok=True)
         self.conn = sqlite3.connect(db_full_path)
+        logger.info(f"БД открыта: {db_full_path}")
         self.create_tables()
 
     def create_tables(self):
@@ -40,7 +44,16 @@ class FitnessDB:
             )
         ''')
 
+        # Таблица состояния датчика шагов (baseline за каждый день)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sensor_state (
+                date TEXT PRIMARY KEY,
+                baseline INTEGER NOT NULL
+            )
+        ''')
+
         self.conn.commit()
+        logger.debug("Таблицы БД проверены / созданы")
 
 
     def save_user_metrics(self, weight, height, goal):
@@ -52,6 +65,7 @@ class FitnessDB:
             VALUES (?, ?, ?, ?)
         ''', (today, weight, height, goal))
         self.conn.commit()
+        logger.info(f"Метрики сохранены: weight={weight}, height={height}, goal={goal}")
 
     def get_latest_metrics(self):
         """Возвращает последние введенные параметры пользователя"""
@@ -128,6 +142,37 @@ class FitnessDB:
             
         return labels, res_data
 
+    # Методы для датчика шагов
+
+    def get_sensor_baseline(self, date):
+        """Возвращает baseline датчика для указанной даты или None."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            'SELECT baseline FROM sensor_state WHERE date = ?', (date,)
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+    def save_sensor_baseline(self, date, baseline):
+        """Сохраняет или обновляет baseline датчика для указанной даты."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            'INSERT OR REPLACE INTO sensor_state (date, baseline) VALUES (?, ?)',
+            (date, baseline),
+        )
+        self.conn.commit()
+        logger.debug(f"Baseline сохранён: date={date}, baseline={baseline}")
+
+    def update_day_activity(self, date, steps, distance, calories):
+        """Обновляет все поля активности за указанный день (абсолютные значения)."""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO daily_activity (date, steps, distance, calories)
+            VALUES (?, ?, ?, ?)
+        ''', (date, steps, distance, calories))
+        self.conn.commit()
+
     def close(self):
         """Закрыть соединение с базой"""
+        logger.info("БД закрыта")
         self.conn.close()
