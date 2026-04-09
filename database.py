@@ -172,6 +172,16 @@ class FitnessDB:
         ''', (date, steps, distance, calories))
         self.conn.commit()
 
+    def get_activity_for_date(self, date_str):
+        """Возвращает (steps, distance, calories) для указанной даты."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            'SELECT steps, distance, calories FROM daily_activity WHERE date = ?',
+            (date_str,)
+        )
+        row = cursor.fetchone()
+        return (row[0], row[1], row[2]) if row else (0, 0.0, 0.0)
+
     def close(self):
         """Закрыть соединение с базой"""
         logger.info("БД закрыта")
