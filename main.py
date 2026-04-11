@@ -186,11 +186,10 @@ class FitnessApp(App):
         # Проверяем, ждали ли мы возврата из HC permission screen
         if getattr(self, '_hc_waiting_permissions', False):
             self._hc_waiting_permissions = False
-            if hc.has_read_permissions():
-                logger.info("HC разрешения получены после возврата из HC")
-                Clock.schedule_once(lambda dt: self._hc_sync(), 0.3)
-            else:
-                logger.warning("HC разрешения НЕ получены после возврата из HC")
+            # Не проверяем has_read_permissions() — она ненадёжна для HC.
+            # Просто пробуем sync — если разрешения даны, данные загрузятся.
+            logger.info("HC: возврат из экрана разрешений, пробуем sync")
+            Clock.schedule_once(lambda dt: self._hc_sync(), 0.3)
             return
 
         phase = getattr(self, '_perm_phase', None)
@@ -422,7 +421,9 @@ class FitnessApp(App):
     # ── Health Connect ────────────────────────────────────────────────────
 
     def hc_connect(self):
-        """Нажатие кнопки Health Connect."""
+        """Нажатие кнопки Health Connect.
+        Пробуем синхронизацию напрямую (30 дней).
+        Если нет разрешений — HC сам покажет ошибку, и мы откроем экран разрешений."""
         if not ANDROID:
             self._hc_show_popup("Недоступно",
                 "Health Connect работает только на Android.")
@@ -442,10 +443,11 @@ class FitnessApp(App):
                 f"из Google Play и повторите.")
             return
 
-        if not hc.has_read_permissions():
-            self._hc_request_permissions()
-        else:
+        # Проверяем разрешения: если есть — синхронизируем, если нет — запрашиваем
+        if hc.has_read_permissions():
             self._hc_sync()
+        else:
+            self._hc_request_permissions()
 
     def _hc_request_permissions(self):
         """Запрашивает разрешения Health Connect.
@@ -461,10 +463,8 @@ class FitnessApp(App):
             pass
 
         if sdk >= 34:
-            # Android 14+: HC разрешения — обычные runtime permissions
             self._hc_request_permissions_standard()
         else:
-            # Android 9–13: разрешения управляются через HC-приложение
             self._hc_request_permissions_via_hc_app()
 
     def _hc_request_permissions_standard(self):
@@ -550,13 +550,13 @@ class FitnessApp(App):
             self.main_screen.on_enter()  # обновляем цифры на экране
 
     def _hc_auto_sync(self):
-        """Тихая синхронизация при старте, если разрешения уже есть."""
+        """Тихая синхронизация при старте (3 дня), если HC доступен и разрешения есть."""
         if not ANDROID:
             return
         try:
             if hc.is_available() and hc.has_read_permissions():
-                logger.info("HC auto-sync при запуске")
-                hc.sync_from_hc(self.db, days=30,
+                logger.info("HC auto-sync при запуске (3 дня)")
+                hc.sync_from_hc(self.db, days=3,
                                  on_done=self._hc_auto_sync_done)
         except Exception as e:
             logger.warning(f"HC auto-sync check failed: {e}")
