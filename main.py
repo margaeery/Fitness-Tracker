@@ -548,6 +548,7 @@ class FitnessApp(App):
         self._hc_show_popup(title, message)
         if success and hasattr(self, 'main_screen'):
             self.main_screen.on_enter()  # обновляем цифры на экране
+            self._check_goal_after_hc()
 
     def _hc_auto_sync(self):
         """Тихая синхронизация при старте (3 дня), если HC доступен и разрешения есть."""
@@ -566,6 +567,37 @@ class FitnessApp(App):
         logger.info(f"HC auto-sync: success={success}, {message}")
         if success and hasattr(self, 'main_screen'):
             self.main_screen.on_enter()
+            self._check_goal_after_hc()
+
+    def _check_goal_after_hc(self):
+        """Проверяет достижение цели после HC-синхронизации."""
+        try:
+            metrics = self.db.get_latest_metrics()
+            if not metrics:
+                return
+            goal = int(metrics[2])
+            if goal <= 0:
+                return
+            today_steps = self.db.get_today_steps()
+            if today_steps >= goal:
+                logger.info(f"HC sync: цель достигнута {today_steps}/{goal}")
+                self._send_goal_notification()
+        except Exception as e:
+            logger.warning(f"Goal check after HC failed: {e}")
+
+    def _send_goal_notification(self):
+        """Отправляет уведомление о достижении цели из главного приложения."""
+        try:
+            from plyer import notification
+            notification.notify(
+                title='Цель достигнута!',
+                message='Поздравляем! Вы выполнили дневную цель по шагам!',
+                app_name='FitnessTracker',
+                timeout=10,
+            )
+            logger.info("Goal notification sent from main app")
+        except Exception as e:
+            logger.warning(f"Goal notification failed: {e}")
 
     def _hc_set_btn_text(self, text):
         """Меняет текст кнопки Health Connect в ActionBar."""

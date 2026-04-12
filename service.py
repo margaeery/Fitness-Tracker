@@ -33,6 +33,8 @@ from calculator import FitnessCalculator
 
 # Файл-флаг: приложение на экране
 FOREGROUND_FLAG = os.path.join(DB_PATH, '.app_foreground')
+# Файл-флаг: HC обновил данные, нужно перечитать БД
+HC_SYNC_FLAG = os.path.join(DB_PATH, '.hc_sync')
 
 # Логирование
 logging.basicConfig(
@@ -247,6 +249,21 @@ class ServiceState:
         if metrics:
             self.weight, self.height, self.goal = metrics
 
+    def check_hc_sync(self):
+        """Проверяет, обновил ли HC данные. Если да — перечитывает БД."""
+        if not os.path.exists(HC_SYNC_FLAG):
+            return
+        try:
+            os.remove(HC_SYNC_FLAG)
+        except OSError:
+            pass
+        old_steps = self.steps
+        self._load_from_db()
+        logger.info(
+            f"HC sync detected: steps {old_steps} → {self.steps}, "
+            f"baseline={self.baseline}"
+        )
+
     def check_goal_change(self):
         """Проверяет, изменилась ли цель. Если да — сбрасывает флаг уведомления."""
         metrics = self.db.get_latest_metrics()
@@ -370,6 +387,9 @@ def main():
                     check_interval, save_interval = BG_CHECK, BG_SAVE
                 logger.info(f"Режим → {current_mode} "
                             f"(check={check_interval}s, save={save_interval}s)")
+
+            # Проверяем, обновил ли HC данные
+            state.check_hc_sync()
 
             # Проверяем смену дня
             state.handle_midnight()

@@ -13,7 +13,9 @@
 """
 
 import logging
+import os
 import threading
+from datetime import datetime
 
 logger = logging.getLogger('FitnessTracker.HealthConnect')
 
@@ -153,6 +155,11 @@ if ANDROID:
 
 # ── Утилиты ──────────────────────────────────────────────────────────
 
+# Файл-флаг для сигнала сервису о том, что HC обновил данные
+from database import DB_PATH as _DB_PATH
+HC_SYNC_FLAG = os.path.join(_DB_PATH, '.hc_sync')
+
+
 def _merge_steps_to_db(db, steps_by_day):
     """Объединяет шаги HC с локальной БД.
     Дистанция и калории вычисляются локально через FitnessCalculator."""
@@ -160,6 +167,9 @@ def _merge_steps_to_db(db, steps_by_day):
     metrics = db.get_latest_metrics()
     weight = float(metrics[0]) if metrics else 70.0
     height = float(metrics[1]) if metrics else 170.0
+
+    today = datetime.now().strftime('%Y-%m-%d')
+    today_updated = False
 
     merged = 0
     for day in sorted(steps_by_day):
@@ -172,6 +182,20 @@ def _merge_steps_to_db(db, steps_by_day):
             kcal = FitnessCalculator.calculate_calories(hc_steps, weight)
             db.update_day_activity(day, hc_steps, dist_km, kcal)
             merged += 1
+            if day == today:
+                today_updated = True
+
+    # Если обновили сегодняшние шаги — сбрасываем baseline датчика,
+    # чтобы сервис пересчитал его с учётом HC-данных
+    if today_updated:
+        db.delete_sensor_baseline(today)
+        try:
+            with open(HC_SYNC_FLAG, 'w') as f:
+                f.write('1')
+        except OSError:
+            pass
+        logger.info("HC merge: baseline сброшен, флаг записан")
+
     return merged, len(steps_by_day)
 
 

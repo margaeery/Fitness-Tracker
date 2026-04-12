@@ -163,6 +163,13 @@ class FitnessDB:
         self.conn.commit()
         logger.debug(f"Baseline сохранён: date={date}, baseline={baseline}")
 
+    def delete_sensor_baseline(self, date):
+        """Удаляет baseline датчика для указанной даты (сервис пересчитает)."""
+        cursor = self.conn.cursor()
+        cursor.execute('DELETE FROM sensor_state WHERE date = ?', (date,))
+        self.conn.commit()
+        logger.debug(f"Baseline удалён: date={date}")
+
     def update_day_activity(self, date, steps, distance, calories):
         """Обновляет все поля активности за указанный день (абсолютные значения)."""
         cursor = self.conn.cursor()
