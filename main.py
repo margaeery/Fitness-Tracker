@@ -6,6 +6,7 @@
 
 import logging
 import os
+import time as _time
 
 from kivy.app import App
 from kivy.uix.screenmanager import ScreenManager, Screen, NoTransition
@@ -383,14 +384,14 @@ class FitnessApp(App):
     # Периодическое обновление UI 
 
     def _start_ui_refresh(self):
-        """Запускает таймер обновления UI (каждые 30 секунд)."""
+        """Запускает таймер обновления UI (каждые 15 секунд)."""
         self._stop_ui_refresh()
         # Немедленное обновление при заходе
         if hasattr(self, 'main_screen'):
             self.main_screen.on_enter()
             logger.debug("Экран обновлён сразу")
-        self._refresh_event = Clock.schedule_interval(self._refresh_ui, 30)
-        logger.debug("UI refresh timer запущен (30s)")
+        self._refresh_event = Clock.schedule_interval(self._refresh_ui, 15)
+        logger.debug("UI refresh timer запущен (15s)")
 
     def _stop_ui_refresh(self):
         """Останавливает таймер обновления UI."""
@@ -417,6 +418,11 @@ class FitnessApp(App):
         if hasattr(self, 'main_screen') and hasattr(self, 'carousel'):
             if self.carousel.index == 0:
                 self.main_screen.on_enter()
+        # Периодическая HC-синхронизация (не чаще раз в 60 секунд)
+        now = _time.time()
+        if now - getattr(self, '_last_hc_sync_time', 0) >= 60:
+            self._last_hc_sync_time = now
+            self._hc_auto_sync()
 
     # ── Health Connect ────────────────────────────────────────────────────
 
@@ -544,30 +550,54 @@ class FitnessApp(App):
     def _hc_sync_done(self, success, message):
         """Вызывается когда синхронизация завершена."""
         self._hc_set_btn_text("Health Connect")
-        title = "Health Connect" if success else "Ошибка"
-        self._hc_show_popup(title, message)
-        if success and hasattr(self, 'main_screen'):
-            self.main_screen.on_enter()  # обновляем цифры на экране
-            self._check_goal_after_hc()
+        if success:
+            self._hc_auto_disabled = False  # разрешаем авто-синхронизацию
+            self._hc_show_popup("Health Connect", message)
+            if hasattr(self, 'main_screen'):
+                self.main_screen.on_enter()
+                self._check_goal_after_hc()
+        else:
+            # Понятное сообщение при отсутствии разрешений
+            is_perm = any(w in message for w in ('SecurityException', 'PERMISSION', 'permission'))
+            if is_perm:
+                self._hc_show_popup("Доступ отклонён",
+                    "Разрешения Health Connect\nне получены.\n\n"
+                    "Откройте настройки HC\nи выдайте доступ.")
+            else:
+                self._hc_show_popup("Ошибка", message)
 
     def _hc_auto_sync(self):
-        """Тихая синхронизация при старте (3 дня), если HC доступен и разрешения есть."""
+        """Тихая синхронизация (1 день), если HC доступен."""
         if not ANDROID:
             return
+        if getattr(self, '_hc_auto_disabled', False):
+            return
+        if getattr(self, '_hc_syncing', False):
+            return
         try:
-            if hc.is_available() and hc.has_read_permissions():
-                logger.info("HC auto-sync при запуске (3 дня)")
-                hc.sync_from_hc(self.db, days=3,
+            if hc.is_available():
+                self._hc_syncing = True
+                logger.debug("HC auto-sync (1 день)")
+                hc.sync_from_hc(self.db, days=1,
                                  on_done=self._hc_auto_sync_done)
         except Exception as e:
-            logger.warning(f"HC auto-sync check failed: {e}")
+            self._hc_syncing = False
+            logger.warning(f"HC auto-sync failed: {e}")
 
     def _hc_auto_sync_done(self, success, message):
         """Тихое завершение авто-синхронизации — только обновляем UI."""
+        self._hc_syncing = False
         logger.info(f"HC auto-sync: success={success}, {message}")
-        if success and hasattr(self, 'main_screen'):
-            self.main_screen.on_enter()
-            self._check_goal_after_hc()
+        if success:
+            self._hc_auto_disabled = False
+            if hasattr(self, 'main_screen'):
+                self.main_screen.on_enter()
+                self._check_goal_after_hc()
+        else:
+            is_perm = any(w in message for w in ('SecurityException', 'PERMISSION', 'permission'))
+            if is_perm:
+                self._hc_auto_disabled = True
+                logger.info("HC auto-sync отключен: нет разрешений")
 
     def _check_goal_after_hc(self):
         """Проверяет достижение цели после HC-синхронизации."""
@@ -586,18 +616,34 @@ class FitnessApp(App):
             logger.warning(f"Goal check after HC failed: {e}")
 
     def _send_goal_notification(self):
-        """Отправляет уведомление о достижении цели из главного приложения."""
+        """Отправляет уведомление о достижении цели через Java Notification API."""
         try:
-            from plyer import notification
-            notification.notify(
-                title='Цель достигнута!',
-                message='Поздравляем! Вы выполнили дневную цель по шагам!',
-                app_name='FitnessTracker',
-                timeout=10,
+            from jnius import autoclass as _ac
+            Context = _ac('android.content.Context')
+            NotificationBuilder = _ac('android.app.Notification$Builder')
+            NotificationManager = _ac('android.app.NotificationManager')
+            NotificationChannel = _ac('android.app.NotificationChannel')
+
+            activity = _ac('org.kivy.android.PythonActivity').mActivity
+            context = activity.getApplicationContext()
+            nm = context.getSystemService(Context.NOTIFICATION_SERVICE)
+
+            channel_id = 'fitness_goals'
+            channel = NotificationChannel(
+                channel_id, 'Достижение целей',
+                NotificationManager.IMPORTANCE_HIGH,
             )
-            logger.info("Goal notification sent from main app")
+            nm.createNotificationChannel(channel)
+
+            builder = NotificationBuilder(context, channel_id)
+            builder.setContentTitle('Цель достигнута!')
+            builder.setContentText('Поздравляем! Вы выполнили дневную цель по шагам!')
+            builder.setSmallIcon(context.getApplicationInfo().icon)
+            builder.setAutoCancel(True)
+            nm.notify(1002, builder.build())
+            logger.info('Goal notification sent from main app')
         except Exception as e:
-            logger.warning(f"Goal notification failed: {e}")
+            logger.warning(f'Goal notification failed: {e}')
 
     def _hc_set_btn_text(self, text):
         """Меняет текст кнопки Health Connect в ActionBar."""

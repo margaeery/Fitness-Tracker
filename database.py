@@ -17,7 +17,7 @@ class FitnessDB:
         # При инициализации создаем соединение и таблицы
         db_full_path = os.path.join(DB_PATH, db_name)
         os.makedirs(DB_PATH, exist_ok=True)
-        self.conn = sqlite3.connect(db_full_path)
+        self.conn = sqlite3.connect(db_full_path, isolation_level=None)
         logger.info(f"БД открыта: {db_full_path}")
         self.create_tables()
 

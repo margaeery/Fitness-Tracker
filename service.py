@@ -214,6 +214,21 @@ class ServiceState:
         if self.height <= 0 or self.weight <= 0:
             return
 
+        # Защита от перезаписи HC-данных: если в БД больше шагов,
+        # принимаем значение из БД и пересчитываем baseline
+        db_steps = self.db.get_today_steps()
+        if db_steps > self.steps:
+            logger.info(
+                f"DB содержит больше шагов ({db_steps} > {self.steps}), "
+                f"принимаем HC-значение"
+            )
+            self.steps = db_steps
+            self.baseline = None  # пересчитается при следующем чтении датчика
+            self.db.delete_sensor_baseline(self.current_date)
+            self.dirty = False
+            self.last_save_time = time.time()
+            return
+
         dist = FitnessCalculator.calculate_distance(self.steps, self.height)
         kcal = FitnessCalculator.calculate_calories(self.steps, self.weight)
         self.db.update_day_activity(self.current_date, self.steps, dist, kcal)
@@ -258,6 +273,7 @@ class ServiceState:
         except OSError:
             pass
         old_steps = self.steps
+        self.dirty = False  # предотвращаем перезапись старыми данными
         self._load_from_db()
         logger.info(
             f"HC sync detected: steps {old_steps} → {self.steps}, "
