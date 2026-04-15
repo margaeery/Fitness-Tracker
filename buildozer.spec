@@ -3,7 +3,7 @@
 title = FitnessTracker
 package.name = FitnessTracker
 package.domain = org.test
-version = 0.1.2
+version = 0.1.3
 
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
@@ -27,7 +27,7 @@ orientation = portrait
 
 android.gradle_dependencies = androidx.health.connect:connect-client:1.0.0-alpha11
 
-android.permissions = ACTIVITY_RECOGNITION,POST_NOTIFICATIONS,FOREGROUND_SERVICE,WAKE_LOCK,REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE,android.permission.health.READ_STEPS
+android.permissions = ACTIVITY_RECOGNITION,POST_NOTIFICATIONS,FOREGROUND_SERVICE,FOREGROUND_SERVICE_HEALTH,WAKE_LOCK,REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE,android.permission.health.READ_STEPS
 
 osx.python_version = 3
 osx.kivy_version = 2.2.0

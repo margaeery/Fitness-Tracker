@@ -208,6 +208,8 @@ class FitnessApp(App):
             return
         self._set_foreground_flag(True)
         self._start_ui_refresh()
+        # Тихая авто-синхронизация HC при возврате из фона (один раз)
+        self._hc_auto_sync()
 
     # Разрешения и запуск сервиса
 
@@ -418,11 +420,6 @@ class FitnessApp(App):
         if hasattr(self, 'main_screen') and hasattr(self, 'carousel'):
             if self.carousel.index == 0:
                 self.main_screen.on_enter()
-        # Периодическая HC-синхронизация (не чаще раз в 60 секунд)
-        now = _time.time()
-        if now - getattr(self, '_last_hc_sync_time', 0) >= 60:
-            self._last_hc_sync_time = now
-            self._hc_auto_sync()
 
     # ── Health Connect ────────────────────────────────────────────────────
 
@@ -457,60 +454,77 @@ class FitnessApp(App):
 
     def _hc_request_permissions(self):
         """Запрашивает разрешения Health Connect.
-        API 34+: стандартный диалог request_permissions.
-        API < 34: открывает экран разрешений HC-приложения."""
+        API 34+: HC — часть системы, используем requestPermissions() +
+                 платформенный HealthConnectManager (проверяет Android perms).
+        API < 34: HC — отдельное приложение, нужен intent для открытия
+                  экрана разрешений HC-приложения."""
         logger.info("Запрашиваем разрешения Health Connect")
-
-        sdk = 0
         try:
             from jnius import autoclass as _ac
             sdk = _ac('android.os.Build$VERSION').SDK_INT
-        except Exception:
-            pass
 
-        if sdk >= 34:
-            self._hc_request_permissions_standard()
-        else:
-            self._hc_request_permissions_via_hc_app()
-
-    def _hc_request_permissions_standard(self):
-        """Запрос разрешений HC через стандартный Android-диалог (API 34+)."""
-        try:
-            from android.permissions import request_permissions
-
-            def _on_result(permissions, grants):
-                if all(grants):
-                    logger.info("HC разрешения получены")
-                    Clock.schedule_once(lambda dt: self._hc_sync(), 0)
-                else:
-                    denied = [p.split('.')[-1] for p, g
-                              in zip(permissions, grants) if not g]
-                    logger.warning(f"HC разрешения отклонены: {denied}")
-                    self._hc_show_popup(
-                        "Доступ отклонён",
-                        "Без разрешений Health Connect\n"
-                        "синхронизация недоступна.")
-
-            request_permissions(hc.HC_READ_PERMISSIONS, _on_result)
+            if sdk >= 34:
+                # API 34+: стандартный запрос runtime-разрешений
+                self._hc_request_permissions_runtime()
+            else:
+                # API < 34: через intent HC-приложения
+                self._hc_request_permissions_intent()
         except Exception as e:
-            logger.error(f"Ошибка запроса HC разрешений: {e}")
+            logger.error(f"Ошибка запроса HC permissions: {e}")
             self._hc_show_popup("Ошибка", str(e))
 
-    def _hc_request_permissions_via_hc_app(self):
-        """Открывает экран разрешений HC-приложения (API < 34).
-        Пользователь сам включает доступ, потом возвращается в приложение."""
-        try:
-            from jnius import autoclass as _ac
-            Intent = _ac('android.content.Intent')
-            PythonActivity = _ac('org.kivy.android.PythonActivity')
-            activity = PythonActivity.mActivity
-            pkg = activity.getPackageName()
+    def _hc_request_permissions_runtime(self):
+        """API 34+: запрашиваем HC-разрешения как стандартные runtime permissions.
 
-            # Пробуем открыть экран управления разрешениями HC для нашего приложения
-            intent = Intent('androidx.health.ACTION_MANAGE_HEALTH_PERMISSIONS')
-            intent.putExtra('android.intent.extra.PACKAGE_NAME', pkg)
+        На API 34+ HC — часть системы. Мы используем платформенный
+        HealthConnectManager (не SDK content provider), который проверяет
+        стандартные Android runtime permissions. Поэтому requestPermissions()
+        здесь — правильный и достаточный подход.
 
-            if intent.resolveActivity(activity.getPackageManager()) is not None:
+        Fallback: если requestPermissions() не сработает — открываем
+        настройки HC через intent."""
+        logger.info("HC: requestPermissions (runtime) для API 34+")
+        from android.permissions import request_permissions
+        self._hc_waiting_permissions = True
+        request_permissions(
+            ['android.permission.health.READ_STEPS'],
+            self._on_hc_runtime_perm_result)
+
+    def _on_hc_runtime_perm_result(self, permissions, grants):
+        """Callback после стандартного requestPermissions (API 34+)."""
+        self._hc_waiting_permissions = False
+        granted = all(grants)
+        logger.info(f"HC runtime permissions result: {list(zip(permissions, grants))}")
+        if granted:
+            Clock.schedule_once(lambda dt: self._hc_sync(), 0.3)
+        else:
+            self._hc_show_popup("Доступ отклонён",
+                "Разрешение на чтение шагов\nне получено.\n\n"
+                "Предоставьте доступ в\nНастройки → Приложения →\n"
+                "FitnessTracker → Разрешения.")
+
+    def _hc_request_permissions_intent(self):
+        """API < 34: открываем экран разрешений через intent HC-приложения."""
+        from jnius import autoclass as _ac
+        Intent = _ac('android.content.Intent')
+        PythonActivity = _ac('org.kivy.android.PythonActivity')
+        activity = PythonActivity.mActivity
+        pkg = activity.getPackageName()
+        pm = activity.getPackageManager()
+
+        # Список intents для попытки (в порядке приоритета)
+        intents = []
+
+        # Через HC-приложение
+        i = Intent('androidx.health.ACTION_MANAGE_HEALTH_PERMISSIONS')
+        i.putExtra('android.intent.extra.PACKAGE_NAME', pkg)
+        intents.append(i)
+
+        # Запасной: общие настройки HC
+        intents.append(Intent('androidx.health.ACTION_HEALTH_CONNECT_SETTINGS'))
+
+        for intent in intents:
+            if intent.resolveActivity(pm) is not None:
                 self._hc_waiting_permissions = True
                 activity.startActivity(intent)
                 self._hc_show_popup(
@@ -519,28 +533,14 @@ class FitnessApp(App):
                     "Включите доступ к данным\n"
                     "для FitnessTracker.\n\n"
                     "Затем вернитесь в приложение.")
-            else:
-                # Пробуем открыть общие настройки HC
-                intent2 = Intent('androidx.health.ACTION_HEALTH_CONNECT_SETTINGS')
-                if intent2.resolveActivity(activity.getPackageManager()) is not None:
-                    self._hc_waiting_permissions = True
-                    activity.startActivity(intent2)
-                    self._hc_show_popup(
-                        "Разрешения",
-                        "Откроется Health Connect.\n"
-                        "Найдите FitnessTracker\n"
-                        "в списке приложений\n"
-                        "и включите все разрешения.")
-                else:
-                    self._hc_show_popup(
-                        "Ошибка",
-                        "Не удалось открыть\n"
-                        "настройки Health Connect.\n"
-                        "Откройте HC вручную и\n"
-                        "выдайте разрешения.")
-        except Exception as e:
-            logger.error(f"Ошибка открытия HC permissions: {e}")
-            self._hc_show_popup("Ошибка", str(e))
+                return
+
+        self._hc_show_popup(
+            "Ошибка",
+            "Не удалось открыть\n"
+            "настройки Health Connect.\n"
+            "Откройте HC вручную и\n"
+            "выдайте разрешения.")
 
     def _hc_sync(self):
         """Запускает синхронизацию данных из Health Connect."""

@@ -299,11 +299,13 @@ class ServiceState:
 def main():
     logger.info("═══ StepService запускается ═══")
 
-    # Предотвращаем убийство сервиса Android
     service = PythonService.mService
-    service.setAutoRestartService(True)
+    # НЕ вызываем setAutoRestartService до startForeground:
+    # На API 34+ без foregroundServiceType startForeground падает,
+    # и auto-restart вызвал бы бесконечный цикл перезапусков.
 
     # Меняем текст постоянного уведомления сервиса
+    fg_ok = False
     try:
         NotificationBuilder = autoclass('android.app.Notification$Builder')
         NotificationManager = autoclass('android.app.NotificationManager')
@@ -326,10 +328,26 @@ def main():
         builder.setSmallIcon(context.getApplicationInfo().icon)
         builder.setOngoing(True)
 
-        service.startForeground(1, builder.build())
-        logger.info("Уведомление сервиса обновлено")
+        notification = builder.build()
+
+        # API 34+ требует foregroundServiceType
+        sdk = autoclass('android.os.Build$VERSION').SDK_INT
+        if sdk >= 34:
+            ServiceInfo = autoclass('android.content.pm.ServiceInfo')
+            service.startForeground(
+                1, notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH)
+        else:
+            service.startForeground(1, notification)
+
+        fg_ok = True
+        logger.info(f"Foreground сервис запущен (SDK {sdk})")
     except Exception as e:
-        logger.warning(f"Не удалось обновить уведомление сервиса: {e}")
+        logger.warning(f"Не удалось запустить foreground сервис: {e}")
+
+    # Включаем auto-restart только после успешного startForeground
+    if fg_ok:
+        service.setAutoRestartService(True)
 
     # WakeLock — не даём CPU засыпать, иначе датчик не читается
     pm = service.getSystemService(Context.POWER_SERVICE)

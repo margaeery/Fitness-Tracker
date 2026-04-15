@@ -152,6 +152,31 @@ if ANDROID:
                 self._result = result
             self._event.set()
 
+    class _PlatformOutcomeReceiver(PythonJavaClass):
+        """android.os.OutcomeReceiver для платформенного HealthConnectManager (API 34+).
+        Через type erasure: onResult(Object), onError(Throwable)."""
+        __javainterfaces__ = ['android/os/OutcomeReceiver']
+        __javacontext__ = 'app'
+
+        def __init__(self):
+            super().__init__()
+            self._event = threading.Event()
+            self._result = None
+            self._error = None
+
+        @java_method('(Ljava/lang/Object;)V')
+        def onResult(self, result):
+            self._result = result
+            self._event.set()
+
+        @java_method('(Ljava/lang/Throwable;)V')
+        def onError(self, error):
+            try:
+                self._error = str(error.toString())
+            except Exception:
+                self._error = "Unknown error"
+            self._event.set()
+
 
 # ── Утилиты ──────────────────────────────────────────────────────────
 
@@ -217,8 +242,10 @@ def sync_from_hc(db, days=30, on_done=None):
     Дистанция и калории вычисляются локально через FitnessCalculator.
 
     ВСЕ Java-вызовы на ГЛАВНОМ потоке (classloader видит DEX).
-    Результат suspend-функции получаем через Continuation callback
-    + Clock.schedule_interval polling.
+
+    API 34+: используем платформенный HealthConnectManager с OutcomeReceiver
+             (не зависит от SDK-библиотеки, проверяет стандартные Android permissions).
+    API < 34: используем HC SDK (connect-client) через Kotlin Continuation.
 
     on_done(success: bool, message: str) вызывается в главном потоке.
     """
@@ -227,6 +254,152 @@ def sync_from_hc(db, days=30, on_done=None):
             on_done(False, "Health Connect недоступен (не Android)")
         return
 
+    sdk = _get_sdk_int()
+    if sdk >= 34:
+        _sync_platform(db, days, on_done)
+    else:
+        _sync_sdk(db, days, on_done)
+
+
+def _sync_platform(db, days, on_done):
+    """API 34+: читаем шаги через платформенный HealthConnectManager.
+
+    HealthConnectManager — системный сервис Android 14+.
+    readRecords() принимает OutcomeReceiver (не Kotlin Continuation).
+    Проверяет стандартные Android runtime permissions."""
+    from kivy.clock import Clock
+    import time as _time
+
+    try:
+        logger.info("HC sync (platform): загружаем классы...")
+
+        PythonActivity = autoclass('org.kivy.android.PythonActivity')
+        context = PythonActivity.mActivity
+
+        # Платформенные классы (android.health.connect.*)
+        ReadRecordsRequestBuilder = autoclass(
+            'android.health.connect.ReadRecordsRequestUsingFilters$Builder')
+        TimeInstantRangeFilterBuilder = autoclass(
+            'android.health.connect.TimeInstantRangeFilter$Builder')
+        Instant = autoclass('java.time.Instant')
+        ZoneId = autoclass('java.time.ZoneId')
+        Executors = autoclass('java.util.concurrent.Executors')
+
+        # Загружаем java.lang.Class объекты через classloader
+        Thread = autoclass('java.lang.Thread')
+        cl = Thread.currentThread().getContextClassLoader()
+        steps_class = cl.loadClass('android.health.connect.datatypes.StepsRecord')
+        hc_mgr_class = cl.loadClass('android.health.connect.HealthConnectManager')
+
+        logger.info("HC sync (platform): классы загружены, строим запрос...")
+
+        # Получаем HealthConnectManager через getSystemService(Class<T>)
+        # String-вариант может не работать через pyjnius
+        manager = context.getSystemService(hc_mgr_class)
+        if manager is None:
+            # Fallback: попробуем через applicationContext
+            app_ctx = context.getApplicationContext()
+            manager = app_ctx.getSystemService(hc_mgr_class)
+        if manager is None:
+            raise RuntimeError(
+                "getSystemService(HealthConnectManager) вернул null — "
+                "HC недоступен на устройстве")
+
+        # Строим TimeInstantRangeFilter
+        end_ms = int(_time.time() * 1000)
+        start_ms = end_ms - days * 24 * 3600 * 1000
+        start_instant = Instant.ofEpochMilli(int(start_ms))
+        end_instant = Instant.ofEpochMilli(int(end_ms))
+
+        time_filter = TimeInstantRangeFilterBuilder() \
+            .setStartTime(start_instant) \
+            .setEndTime(end_instant) \
+            .build()
+
+        # Строим ReadRecordsRequest
+        request = ReadRecordsRequestBuilder(steps_class) \
+            .setTimeRangeFilter(time_filter) \
+            .build()
+
+        logger.info("HC sync (platform): запрос построен, вызываем readRecords...")
+
+        # Создаём OutcomeReceiver
+        receiver = _PlatformOutcomeReceiver()
+
+        # Executor для callback (main thread)
+        executor = Executors.newSingleThreadExecutor()
+
+        # readRecords(request, executor, outcomeReceiver)
+        manager.readRecords(request, executor, receiver)
+
+        logger.info("HC sync (platform): ждём callback...")
+
+        # Polling для результата
+        _poll_event = [None]
+
+        def _check_result(dt):
+            if not receiver._event.is_set():
+                return
+
+            if _poll_event[0]:
+                _poll_event[0].cancel()
+                _poll_event[0] = None
+
+            if receiver._error:
+                logger.error(f"HC platform readRecords error: {receiver._error}")
+                if on_done:
+                    on_done(False, receiver._error)
+                return
+
+            try:
+                _process_platform_response(receiver._result, ZoneId, db, on_done)
+            except Exception as e:
+                logger.error(f"HC platform process error: {e}", exc_info=True)
+                if on_done:
+                    on_done(False, str(e))
+
+        _poll_event[0] = Clock.schedule_interval(_check_result, 0.2)
+
+        def _timeout(dt):
+            if receiver._event.is_set():
+                return
+            if _poll_event[0]:
+                _poll_event[0].cancel()
+                _poll_event[0] = None
+            logger.error("HC sync (platform): таймаут 30с")
+            if on_done:
+                on_done(False, "Таймаут ожидания Health Connect (30с)")
+
+        Clock.schedule_once(_timeout, 30)
+
+    except Exception as e:
+        logger.error(f"HC sync (platform) error: {e}", exc_info=True)
+        if on_done:
+            on_done(False, str(e))
+
+
+def _process_platform_response(response, ZoneId, db, on_done):
+    """Обрабатывает ReadRecordsResponse от платформенного HealthConnectManager."""
+    records = response.getRecords()
+    zone = ZoneId.systemDefault()
+    steps_by_day = {}
+
+    for i in range(records.size()):
+        r = records.get(i)
+        # Платформенный StepsRecord: getStartTime(), getCount()
+        local_date = r.getStartTime().atZone(zone).toLocalDate()
+        day = str(local_date.toString())
+        steps_by_day[day] = steps_by_day.get(day, 0) + int(r.getCount())
+
+    merged, total = _merge_steps_to_db(db, steps_by_day)
+    msg = f"Обновлено {merged} записей из {total} дней Health Connect"
+    logger.info(f"HC sync (platform): {msg}")
+    if on_done:
+        on_done(True, msg)
+
+
+def _sync_sdk(db, days, on_done):
+    """API < 34: читаем шаги через HC SDK (connect-client) с Kotlin Continuation."""
     from kivy.clock import Clock
     import time as _time
 
