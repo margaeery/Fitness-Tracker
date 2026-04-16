@@ -17,7 +17,7 @@ class FitnessDB:
         # При инициализации создаем соединение и таблицы
         db_full_path = os.path.join(DB_PATH, db_name)
         os.makedirs(DB_PATH, exist_ok=True)
-        self.conn = sqlite3.connect(db_full_path)
+        self.conn = sqlite3.connect(db_full_path, isolation_level=None)
         logger.info(f"БД открыта: {db_full_path}")
         self.create_tables()
 
@@ -163,6 +163,13 @@ class FitnessDB:
         self.conn.commit()
         logger.debug(f"Baseline сохранён: date={date}, baseline={baseline}")
 
+    def delete_sensor_baseline(self, date):
+        """Удаляет baseline датчика для указанной даты (сервис пересчитает)."""
+        cursor = self.conn.cursor()
+        cursor.execute('DELETE FROM sensor_state WHERE date = ?', (date,))
+        self.conn.commit()
+        logger.debug(f"Baseline удалён: date={date}")
+
     def update_day_activity(self, date, steps, distance, calories):
         """Обновляет все поля активности за указанный день (абсолютные значения)."""
         cursor = self.conn.cursor()
@@ -171,6 +178,16 @@ class FitnessDB:
             VALUES (?, ?, ?, ?)
         ''', (date, steps, distance, calories))
         self.conn.commit()
+
+    def get_activity_for_date(self, date_str):
+        """Возвращает (steps, distance, calories) для указанной даты."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            'SELECT steps, distance, calories FROM daily_activity WHERE date = ?',
+            (date_str,)
+        )
+        row = cursor.fetchone()
+        return (row[0], row[1], row[2]) if row else (0, 0.0, 0.0)
 
     def close(self):
         """Закрыть соединение с базой"""

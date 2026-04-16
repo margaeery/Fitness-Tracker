@@ -33,6 +33,8 @@ from calculator import FitnessCalculator
 
 # Файл-флаг: приложение на экране
 FOREGROUND_FLAG = os.path.join(DB_PATH, '.app_foreground')
+# Файл-флаг: HC обновил данные, нужно перечитать БД
+HC_SYNC_FLAG = os.path.join(DB_PATH, '.hc_sync')
 
 # Логирование
 logging.basicConfig(
@@ -212,6 +214,21 @@ class ServiceState:
         if self.height <= 0 or self.weight <= 0:
             return
 
+        # Защита от перезаписи HC-данных: если в БД больше шагов,
+        # принимаем значение из БД и пересчитываем baseline
+        db_steps = self.db.get_today_steps()
+        if db_steps > self.steps:
+            logger.info(
+                f"DB содержит больше шагов ({db_steps} > {self.steps}), "
+                f"принимаем HC-значение"
+            )
+            self.steps = db_steps
+            self.baseline = None  # пересчитается при следующем чтении датчика
+            self.db.delete_sensor_baseline(self.current_date)
+            self.dirty = False
+            self.last_save_time = time.time()
+            return
+
         dist = FitnessCalculator.calculate_distance(self.steps, self.height)
         kcal = FitnessCalculator.calculate_calories(self.steps, self.weight)
         self.db.update_day_activity(self.current_date, self.steps, dist, kcal)
@@ -247,6 +264,22 @@ class ServiceState:
         if metrics:
             self.weight, self.height, self.goal = metrics
 
+    def check_hc_sync(self):
+        """Проверяет, обновил ли HC данные. Если да — перечитывает БД."""
+        if not os.path.exists(HC_SYNC_FLAG):
+            return
+        try:
+            os.remove(HC_SYNC_FLAG)
+        except OSError:
+            pass
+        old_steps = self.steps
+        self.dirty = False  # предотвращаем перезапись старыми данными
+        self._load_from_db()
+        logger.info(
+            f"HC sync detected: steps {old_steps} → {self.steps}, "
+            f"baseline={self.baseline}"
+        )
+
     def check_goal_change(self):
         """Проверяет, изменилась ли цель. Если да — сбрасывает флаг уведомления."""
         metrics = self.db.get_latest_metrics()
@@ -266,11 +299,13 @@ class ServiceState:
 def main():
     logger.info("═══ StepService запускается ═══")
 
-    # Предотвращаем убийство сервиса Android
     service = PythonService.mService
-    service.setAutoRestartService(True)
+    # НЕ вызываем setAutoRestartService до startForeground:
+    # На API 34+ без foregroundServiceType startForeground падает,
+    # и auto-restart вызвал бы бесконечный цикл перезапусков.
 
     # Меняем текст постоянного уведомления сервиса
+    fg_ok = False
     try:
         NotificationBuilder = autoclass('android.app.Notification$Builder')
         NotificationManager = autoclass('android.app.NotificationManager')
@@ -293,10 +328,26 @@ def main():
         builder.setSmallIcon(context.getApplicationInfo().icon)
         builder.setOngoing(True)
 
-        service.startForeground(1, builder.build())
-        logger.info("Уведомление сервиса обновлено")
+        notification = builder.build()
+
+        # API 34+ требует foregroundServiceType
+        sdk = autoclass('android.os.Build$VERSION').SDK_INT
+        if sdk >= 34:
+            ServiceInfo = autoclass('android.content.pm.ServiceInfo')
+            service.startForeground(
+                1, notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH)
+        else:
+            service.startForeground(1, notification)
+
+        fg_ok = True
+        logger.info(f"Foreground сервис запущен (SDK {sdk})")
     except Exception as e:
-        logger.warning(f"Не удалось обновить уведомление сервиса: {e}")
+        logger.warning(f"Не удалось запустить foreground сервис: {e}")
+
+    # Включаем auto-restart только после успешного startForeground
+    if fg_ok:
+        service.setAutoRestartService(True)
 
     # WakeLock — не даём CPU засыпать, иначе датчик не читается
     pm = service.getSystemService(Context.POWER_SERVICE)
@@ -370,6 +421,9 @@ def main():
                     check_interval, save_interval = BG_CHECK, BG_SAVE
                 logger.info(f"Режим → {current_mode} "
                             f"(check={check_interval}s, save={save_interval}s)")
+
+            # Проверяем, обновил ли HC данные
+            state.check_hc_sync()
 
             # Проверяем смену дня
             state.handle_midnight()

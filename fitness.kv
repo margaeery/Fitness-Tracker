@@ -115,6 +115,10 @@
                     with_previous: False
                     app_icon: ''
                 ActionButton:
+                    id: hc_btn
+                    text: 'Health Connect'
+                    on_release: app.hc_connect()
+                ActionButton:
                     text: 'Настройки'
                     on_release: root.open_settings()
 

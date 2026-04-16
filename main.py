@@ -6,6 +6,7 @@
 
 import logging
 import os
+import time as _time
 
 from kivy.app import App
 from kivy.uix.screenmanager import ScreenManager, Screen, NoTransition
@@ -18,6 +19,7 @@ from kivy.clock import Clock
 # Импортируем классы и БД
 from database import FitnessDB, DB_PATH
 from widgets import SetupScreen, MainScreen, StatsScreen
+import health_connect as hc
 
 # Файл-флаг для сигнализации сервису о том, что приложение на экране
 import os as _os
@@ -182,6 +184,15 @@ class FitnessApp(App):
         """Приложение возвращается — обновляем UI или продвигаем цепочку разрешений."""
         logger.info("App → on_resume")
 
+        # Проверяем, ждали ли мы возврата из HC permission screen
+        if getattr(self, '_hc_waiting_permissions', False):
+            self._hc_waiting_permissions = False
+            # Не проверяем has_read_permissions() — она ненадёжна для HC.
+            # Просто пробуем sync — если разрешения даны, данные загрузятся.
+            logger.info("HC: возврат из экрана разрешений, пробуем sync")
+            Clock.schedule_once(lambda dt: self._hc_sync(), 0.3)
+            return
+
         phase = getattr(self, '_perm_phase', None)
         if phase in ('awaiting_activity', 'awaiting_notification'):
             # Диалог разрешения закрылся — продвигаем цепочку
@@ -197,6 +208,8 @@ class FitnessApp(App):
             return
         self._set_foreground_flag(True)
         self._start_ui_refresh()
+        # Тихая авто-синхронизация HC при возврате из фона (один раз)
+        self._hc_auto_sync()
 
     # Разрешения и запуск сервиса
 
@@ -365,20 +378,22 @@ class FitnessApp(App):
             self._set_foreground_flag(True)
             # Начинаем обновлять UI из БД
             self._start_ui_refresh()
+            # Тихая автосинхронизация с HC при запуске (если разрешения уже есть)
+            self._hc_auto_sync()
         except Exception as e:
             logger.error(f"Ошибка запуска сервиса: {e}", exc_info=True)
 
     # Периодическое обновление UI 
 
     def _start_ui_refresh(self):
-        """Запускает таймер обновления UI (каждые 30 секунд)."""
+        """Запускает таймер обновления UI (каждые 15 секунд)."""
         self._stop_ui_refresh()
         # Немедленное обновление при заходе
         if hasattr(self, 'main_screen'):
             self.main_screen.on_enter()
             logger.debug("Экран обновлён сразу")
-        self._refresh_event = Clock.schedule_interval(self._refresh_ui, 30)
-        logger.debug("UI refresh timer запущен (30s)")
+        self._refresh_event = Clock.schedule_interval(self._refresh_ui, 15)
+        logger.debug("UI refresh timer запущен (15s)")
 
     def _stop_ui_refresh(self):
         """Останавливает таймер обновления UI."""
@@ -405,6 +420,265 @@ class FitnessApp(App):
         if hasattr(self, 'main_screen') and hasattr(self, 'carousel'):
             if self.carousel.index == 0:
                 self.main_screen.on_enter()
+
+    # ── Health Connect ────────────────────────────────────────────────────
+
+    def hc_connect(self):
+        """Нажатие кнопки Health Connect.
+        Пробуем синхронизацию напрямую (30 дней).
+        Если нет разрешений — HC сам покажет ошибку, и мы откроем экран разрешений."""
+        if not ANDROID:
+            self._hc_show_popup("Недоступно",
+                "Health Connect работает только на Android.")
+            return
+
+        if not hc.is_available():
+            sdk = 0
+            try:
+                from jnius import autoclass as _ac
+                sdk = _ac('android.os.Build$VERSION').SDK_INT
+            except Exception:
+                pass
+            self._hc_show_popup("Не найден",
+                f"Health Connect не найден.\n"
+                f"(Android API {sdk})\n"
+                f"Установите Health Connect\n"
+                f"из Google Play и повторите.")
+            return
+
+        # Проверяем разрешения: если есть — синхронизируем, если нет — запрашиваем
+        if hc.has_read_permissions():
+            self._hc_sync()
+        else:
+            self._hc_request_permissions()
+
+    def _hc_request_permissions(self):
+        """Запрашивает разрешения Health Connect.
+        API 34+: HC — часть системы, используем requestPermissions() +
+                 платформенный HealthConnectManager (проверяет Android perms).
+        API < 34: HC — отдельное приложение, нужен intent для открытия
+                  экрана разрешений HC-приложения."""
+        logger.info("Запрашиваем разрешения Health Connect")
+        try:
+            from jnius import autoclass as _ac
+            sdk = _ac('android.os.Build$VERSION').SDK_INT
+
+            if sdk >= 34:
+                # API 34+: стандартный запрос runtime-разрешений
+                self._hc_request_permissions_runtime()
+            else:
+                # API < 34: через intent HC-приложения
+                self._hc_request_permissions_intent()
+        except Exception as e:
+            logger.error(f"Ошибка запроса HC permissions: {e}")
+            self._hc_show_popup("Ошибка", str(e))
+
+    def _hc_request_permissions_runtime(self):
+        """API 34+: запрашиваем HC-разрешения как стандартные runtime permissions.
+
+        На API 34+ HC — часть системы. Мы используем платформенный
+        HealthConnectManager (не SDK content provider), который проверяет
+        стандартные Android runtime permissions. Поэтому requestPermissions()
+        здесь — правильный и достаточный подход.
+
+        Fallback: если requestPermissions() не сработает — открываем
+        настройки HC через intent."""
+        logger.info("HC: requestPermissions (runtime) для API 34+")
+        from android.permissions import request_permissions
+        self._hc_waiting_permissions = True
+        request_permissions(
+            ['android.permission.health.READ_STEPS'],
+            self._on_hc_runtime_perm_result)
+
+    def _on_hc_runtime_perm_result(self, permissions, grants):
+        """Callback после стандартного requestPermissions (API 34+)."""
+        self._hc_waiting_permissions = False
+        granted = all(grants)
+        logger.info(f"HC runtime permissions result: {list(zip(permissions, grants))}")
+        if granted:
+            Clock.schedule_once(lambda dt: self._hc_sync(), 0.3)
+        else:
+            self._hc_show_popup("Доступ отклонён",
+                "Разрешение на чтение шагов\nне получено.\n\n"
+                "Предоставьте доступ в\nНастройки → Приложения →\n"
+                "FitnessTracker → Разрешения.")
+
+    def _hc_request_permissions_intent(self):
+        """API < 34: открываем экран разрешений через intent HC-приложения."""
+        from jnius import autoclass as _ac
+        Intent = _ac('android.content.Intent')
+        PythonActivity = _ac('org.kivy.android.PythonActivity')
+        activity = PythonActivity.mActivity
+        pkg = activity.getPackageName()
+        pm = activity.getPackageManager()
+
+        # Список intents для попытки (в порядке приоритета)
+        intents = []
+
+        # Через HC-приложение
+        i = Intent('androidx.health.ACTION_MANAGE_HEALTH_PERMISSIONS')
+        i.putExtra('android.intent.extra.PACKAGE_NAME', pkg)
+        intents.append(i)
+
+        # Запасной: общие настройки HC
+        intents.append(Intent('androidx.health.ACTION_HEALTH_CONNECT_SETTINGS'))
+
+        for intent in intents:
+            if intent.resolveActivity(pm) is not None:
+                self._hc_waiting_permissions = True
+                activity.startActivity(intent)
+                self._hc_show_popup(
+                    "Разрешения",
+                    "Откроется Health Connect.\n"
+                    "Включите доступ к данным\n"
+                    "для FitnessTracker.\n\n"
+                    "Затем вернитесь в приложение.")
+                return
+
+        self._hc_show_popup(
+            "Ошибка",
+            "Не удалось открыть\n"
+            "настройки Health Connect.\n"
+            "Откройте HC вручную и\n"
+            "выдайте разрешения.")
+
+    def _hc_sync(self):
+        """Запускает синхронизацию данных из Health Connect."""
+        self._hc_set_btn_text("Загрузка...")
+        hc.sync_from_hc(self.db, days=30, on_done=self._hc_sync_done)
+
+    def _hc_sync_done(self, success, message):
+        """Вызывается когда синхронизация завершена."""
+        self._hc_set_btn_text("Health Connect")
+        if success:
+            self._hc_auto_disabled = False  # разрешаем авто-синхронизацию
+            self._hc_show_popup("Health Connect", message)
+            if hasattr(self, 'main_screen'):
+                self.main_screen.on_enter()
+                self._check_goal_after_hc()
+        else:
+            # Понятное сообщение при отсутствии разрешений
+            is_perm = any(w in message for w in ('SecurityException', 'PERMISSION', 'permission'))
+            if is_perm:
+                self._hc_show_popup("Доступ отклонён",
+                    "Разрешения Health Connect\nне получены.\n\n"
+                    "Откройте настройки HC\nи выдайте доступ.")
+            else:
+                self._hc_show_popup("Ошибка", message)
+
+    def _hc_auto_sync(self):
+        """Тихая синхронизация (1 день), если HC доступен."""
+        if not ANDROID:
+            return
+        if getattr(self, '_hc_auto_disabled', False):
+            return
+        if getattr(self, '_hc_syncing', False):
+            return
+        try:
+            if hc.is_available():
+                self._hc_syncing = True
+                logger.debug("HC auto-sync (1 день)")
+                hc.sync_from_hc(self.db, days=1,
+                                 on_done=self._hc_auto_sync_done)
+        except Exception as e:
+            self._hc_syncing = False
+            logger.warning(f"HC auto-sync failed: {e}")
+
+    def _hc_auto_sync_done(self, success, message):
+        """Тихое завершение авто-синхронизации — только обновляем UI."""
+        self._hc_syncing = False
+        logger.info(f"HC auto-sync: success={success}, {message}")
+        if success:
+            self._hc_auto_disabled = False
+            if hasattr(self, 'main_screen'):
+                self.main_screen.on_enter()
+                self._check_goal_after_hc()
+        else:
+            is_perm = any(w in message for w in ('SecurityException', 'PERMISSION', 'permission'))
+            if is_perm:
+                self._hc_auto_disabled = True
+                logger.info("HC auto-sync отключен: нет разрешений")
+
+    def _check_goal_after_hc(self):
+        """Проверяет достижение цели после HC-синхронизации."""
+        try:
+            metrics = self.db.get_latest_metrics()
+            if not metrics:
+                return
+            goal = int(metrics[2])
+            if goal <= 0:
+                return
+            today_steps = self.db.get_today_steps()
+            if today_steps >= goal:
+                logger.info(f"HC sync: цель достигнута {today_steps}/{goal}")
+                self._send_goal_notification()
+        except Exception as e:
+            logger.warning(f"Goal check after HC failed: {e}")
+
+    def _send_goal_notification(self):
+        """Отправляет уведомление о достижении цели через Java Notification API."""
+        try:
+            from jnius import autoclass as _ac
+            Context = _ac('android.content.Context')
+            NotificationBuilder = _ac('android.app.Notification$Builder')
+            NotificationManager = _ac('android.app.NotificationManager')
+            NotificationChannel = _ac('android.app.NotificationChannel')
+
+            activity = _ac('org.kivy.android.PythonActivity').mActivity
+            context = activity.getApplicationContext()
+            nm = context.getSystemService(Context.NOTIFICATION_SERVICE)
+
+            channel_id = 'fitness_goals'
+            channel = NotificationChannel(
+                channel_id, 'Достижение целей',
+                NotificationManager.IMPORTANCE_HIGH,
+            )
+            nm.createNotificationChannel(channel)
+
+            builder = NotificationBuilder(context, channel_id)
+            builder.setContentTitle('Цель достигнута!')
+            builder.setContentText('Поздравляем! Вы выполнили дневную цель по шагам!')
+            builder.setSmallIcon(context.getApplicationInfo().icon)
+            builder.setAutoCancel(True)
+            nm.notify(1002, builder.build())
+            logger.info('Goal notification sent from main app')
+        except Exception as e:
+            logger.warning(f'Goal notification failed: {e}')
+
+    def _hc_set_btn_text(self, text):
+        """Меняет текст кнопки Health Connect в ActionBar."""
+        try:
+            self.main_screen.ids.hc_btn.text = text
+        except Exception:
+            pass  # не критично если кнопка недоступна
+
+    def _hc_show_popup(self, title, message):
+        """Показывает информационный попап с результатом HC операции.
+        Безопасно вызывать из любого потока — попап создаётся в главном."""
+        def _do_popup(dt):
+            from kivy.uix.popup import Popup
+            from kivy.uix.label import Label
+            from kivy.uix.button import Button as KButton
+            from kivy.uix.boxlayout import BoxLayout as BL
+
+            content = BL(orientation='vertical', padding=dp(10), spacing=dp(10))
+            content.add_widget(Label(
+                text=message,
+                halign='center',
+                valign='middle',
+            ))
+            btn = KButton(text='ОК', size_hint_y=None, height=dp(48))
+            content.add_widget(btn)
+
+            popup = Popup(
+                title=title,
+                content=content,
+                size_hint=(0.85, 0.4),
+            )
+            btn.bind(on_release=popup.dismiss)
+            popup.open()
+
+        Clock.schedule_once(_do_popup, 0)
 
 if __name__ == '__main__':
     FitnessApp().run()
