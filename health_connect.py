@@ -264,9 +264,8 @@ def sync_from_hc(db, days=30, on_done=None):
 def _sync_platform(db, days, on_done):
     """API 34+: читаем шаги через платформенный HealthConnectManager.
 
-    HealthConnectManager — системный сервис Android 14+.
-    readRecords() принимает OutcomeReceiver (не Kotlin Continuation).
-    Проверяет стандартные Android runtime permissions."""
+    Используем aggregateGroupByPeriod вместо readRecords — HC сам
+    дедуплицирует данные из нескольких источников (без удвоения)."""
     from kivy.clock import Clock
     import time as _time
 
@@ -276,61 +275,55 @@ def _sync_platform(db, days, on_done):
         PythonActivity = autoclass('org.kivy.android.PythonActivity')
         context = PythonActivity.mActivity
 
-        # Платформенные классы (android.health.connect.*)
-        ReadRecordsRequestBuilder = autoclass(
-            'android.health.connect.ReadRecordsRequestUsingFilters$Builder')
+        # Платформенные классы
+        StepsRecord = autoclass('android.health.connect.datatypes.StepsRecord')
+        steps_total = StepsRecord.STEPS_COUNT_TOTAL
+        AggReqBuilder = autoclass(
+            'android.health.connect.AggregateRecordsRequest$Builder')
         TimeInstantRangeFilterBuilder = autoclass(
             'android.health.connect.TimeInstantRangeFilter$Builder')
         Instant = autoclass('java.time.Instant')
-        ZoneId = autoclass('java.time.ZoneId')
+        Period = autoclass('java.time.Period')
         Executors = autoclass('java.util.concurrent.Executors')
 
-        # Загружаем java.lang.Class объекты через classloader
+        # Загружаем HealthConnectManager class через classloader
         Thread = autoclass('java.lang.Thread')
         cl = Thread.currentThread().getContextClassLoader()
-        steps_class = cl.loadClass('android.health.connect.datatypes.StepsRecord')
         hc_mgr_class = cl.loadClass('android.health.connect.HealthConnectManager')
 
         logger.info("HC sync (platform): классы загружены, строим запрос...")
 
-        # Получаем HealthConnectManager через getSystemService(Class<T>)
-        # String-вариант может не работать через pyjnius
+        # Получаем HealthConnectManager
         manager = context.getSystemService(hc_mgr_class)
         if manager is None:
-            # Fallback: попробуем через applicationContext
             app_ctx = context.getApplicationContext()
             manager = app_ctx.getSystemService(hc_mgr_class)
         if manager is None:
             raise RuntimeError(
-                "getSystemService(HealthConnectManager) вернул null — "
-                "HC недоступен на устройстве")
+                "getSystemService(HealthConnectManager) вернул null")
 
-        # Строим TimeInstantRangeFilter
+        # TimeInstantRangeFilter
         end_ms = int(_time.time() * 1000)
         start_ms = end_ms - days * 24 * 3600 * 1000
-        start_instant = Instant.ofEpochMilli(int(start_ms))
-        end_instant = Instant.ofEpochMilli(int(end_ms))
-
         time_filter = TimeInstantRangeFilterBuilder() \
-            .setStartTime(start_instant) \
-            .setEndTime(end_instant) \
+            .setStartTime(Instant.ofEpochMilli(int(start_ms))) \
+            .setEndTime(Instant.ofEpochMilli(int(end_ms))) \
             .build()
 
-        # Строим ReadRecordsRequest
-        request = ReadRecordsRequestBuilder(steps_class) \
-            .setTimeRangeFilter(time_filter) \
+        # AggregateRecordsRequest с STEPS_COUNT_TOTAL
+        agg_request = AggReqBuilder(time_filter) \
+            .addAggregationType(steps_total) \
             .build()
 
-        logger.info("HC sync (platform): запрос построен, вызываем readRecords...")
+        one_day = Period.ofDays(1)
 
-        # Создаём OutcomeReceiver
+        logger.info("HC sync (platform): запрос построен, вызываем aggregateGroupByPeriod...")
+
         receiver = _PlatformOutcomeReceiver()
-
-        # Executor для callback (main thread)
         executor = Executors.newSingleThreadExecutor()
 
-        # readRecords(request, executor, outcomeReceiver)
-        manager.readRecords(request, executor, receiver)
+        # aggregateGroupByPeriod — дедуплицирует автоматически
+        manager.aggregateGroupByPeriod(agg_request, one_day, executor, receiver)
 
         logger.info("HC sync (platform): ждём callback...")
 
@@ -346,13 +339,14 @@ def _sync_platform(db, days, on_done):
                 _poll_event[0] = None
 
             if receiver._error:
-                logger.error(f"HC platform readRecords error: {receiver._error}")
+                logger.error(f"HC platform aggregate error: {receiver._error}")
                 if on_done:
                     on_done(False, receiver._error)
                 return
 
             try:
-                _process_platform_response(receiver._result, ZoneId, db, on_done)
+                _process_aggregate_response(
+                    receiver._result, steps_total, db, on_done)
             except Exception as e:
                 logger.error(f"HC platform process error: {e}", exc_info=True)
                 if on_done:
@@ -378,18 +372,18 @@ def _sync_platform(db, days, on_done):
             on_done(False, str(e))
 
 
-def _process_platform_response(response, ZoneId, db, on_done):
-    """Обрабатывает ReadRecordsResponse от платформенного HealthConnectManager."""
-    records = response.getRecords()
-    zone = ZoneId.systemDefault()
+def _process_aggregate_response(response_list, steps_total, db, on_done):
+    """Обрабатывает List<AggregateRecordsGroupedByPeriodResponse>."""
     steps_by_day = {}
 
-    for i in range(records.size()):
-        r = records.get(i)
-        # Платформенный StepsRecord: getStartTime(), getCount()
-        local_date = r.getStartTime().atZone(zone).toLocalDate()
-        day = str(local_date.toString())
-        steps_by_day[day] = steps_by_day.get(day, 0) + int(r.getCount())
+    for i in range(response_list.size()):
+        group = response_list.get(i)
+        # getStartTime() → LocalDateTime
+        start_time = group.getStartTime()
+        day = str(start_time.toLocalDate().toString())
+        steps_val = group.get(steps_total)
+        if steps_val is not None:
+            steps_by_day[day] = int(steps_val)
 
     merged, total = _merge_steps_to_db(db, steps_by_day)
     msg = f"Обновлено {merged} записей из {total} дней Health Connect"
@@ -527,3 +521,149 @@ def _process_read_response(response, ZoneId, db, on_done):
     logger.info(f"HC sync: {msg}")
     if on_done:
         on_done(True, msg)
+
+
+# ── Блокирующая синхронизация (для фонового сервиса) ─────────────────
+
+def sync_from_hc_blocking(db, context, days=1):
+    """Блокирующая синхронизация с HC (для вызова из сервиса без Kivy Clock).
+
+    Возвращает (success: bool, message: str).
+    API 34+: через платформенный HealthConnectManager (aggregate).
+    API < 34: через HC SDK (readRecords).
+    """
+    if not ANDROID:
+        return (False, "Not Android")
+
+    sdk = _get_sdk_int()
+    try:
+        if sdk >= 34:
+            return _sync_platform_blocking(db, context, days)
+        else:
+            return _sync_sdk_blocking(db, context, days)
+    except Exception as e:
+        logger.error(f"HC blocking sync error: {e}", exc_info=True)
+        return (False, str(e))
+
+
+def _sync_platform_blocking(db, context, days):
+    """Блокирующий вариант платформенного aggregate API."""
+    import time as _time
+
+    StepsRecord = autoclass('android.health.connect.datatypes.StepsRecord')
+    steps_total = StepsRecord.STEPS_COUNT_TOTAL
+    AggReqBuilder = autoclass(
+        'android.health.connect.AggregateRecordsRequest$Builder')
+    TimeInstantRangeFilterBuilder = autoclass(
+        'android.health.connect.TimeInstantRangeFilter$Builder')
+    Instant = autoclass('java.time.Instant')
+    Period = autoclass('java.time.Period')
+    Executors = autoclass('java.util.concurrent.Executors')
+
+    Thread = autoclass('java.lang.Thread')
+    cl = Thread.currentThread().getContextClassLoader()
+    hc_mgr_class = cl.loadClass('android.health.connect.HealthConnectManager')
+
+    manager = context.getSystemService(hc_mgr_class)
+    if manager is None:
+        manager = context.getApplicationContext().getSystemService(hc_mgr_class)
+    if manager is None:
+        return (False, "HealthConnectManager недоступен")
+
+    end_ms = int(_time.time() * 1000)
+    start_ms = end_ms - days * 24 * 3600 * 1000
+    time_filter = TimeInstantRangeFilterBuilder() \
+        .setStartTime(Instant.ofEpochMilli(int(start_ms))) \
+        .setEndTime(Instant.ofEpochMilli(int(end_ms))) \
+        .build()
+
+    agg_request = AggReqBuilder(time_filter) \
+        .addAggregationType(steps_total) \
+        .build()
+
+    receiver = _PlatformOutcomeReceiver()
+    executor = Executors.newSingleThreadExecutor()
+    manager.aggregateGroupByPeriod(
+        agg_request, Period.ofDays(1), executor, receiver)
+
+    if not receiver._event.wait(timeout=30):
+        return (False, "Таймаут HC sync (30с)")
+
+    if receiver._error:
+        return (False, str(receiver._error))
+
+    steps_by_day = {}
+    for i in range(receiver._result.size()):
+        group = receiver._result.get(i)
+        day = str(group.getStartTime().toLocalDate().toString())
+        steps_val = group.get(steps_total)
+        if steps_val is not None:
+            steps_by_day[day] = int(steps_val)
+
+    merged, total = _merge_steps_to_db(db, steps_by_day)
+    return (True, f"HC: {merged}/{total} дней обновлено")
+
+
+def _sync_sdk_blocking(db, context, days):
+    """Блокирующий вариант SDK sync (API < 34)."""
+    import time as _time
+
+    HCClient = autoclass('androidx.health.connect.client.HealthConnectClient')
+    Instant = autoclass('java.time.Instant')
+    TimeRangeFilter = autoclass(
+        'androidx.health.connect.client.time.TimeRangeFilter')
+    ReadRecordsRequest = autoclass(
+        'androidx.health.connect.client.request.ReadRecordsRequest')
+    JvmClassMappingKt = autoclass('kotlin.jvm.JvmClassMappingKt')
+    Collections = autoclass('java.util.Collections')
+    ZoneId = autoclass('java.time.ZoneId')
+    EmptyCC = autoclass('kotlin.coroutines.EmptyCoroutineContext')
+
+    Thread = autoclass('java.lang.Thread')
+    cl = Thread.currentThread().getContextClassLoader()
+    steps_java_class = cl.loadClass(
+        'androidx.health.connect.client.records.StepsRecord')
+    kclass = JvmClassMappingKt.getKotlinClass(steps_java_class)
+
+    client = HCClient.getOrCreate(context)
+
+    end_ms = int(_time.time() * 1000)
+    start_ms = end_ms - days * 24 * 3600 * 1000
+    time_filter = TimeRangeFilter.between(
+        Instant.ofEpochMilli(int(start_ms)),
+        Instant.ofEpochMilli(int(end_ms)))
+
+    request = ReadRecordsRequest(
+        kclass, time_filter, Collections.emptySet(), True, 1000, None)
+
+    cont = _KotlinContinuation(EmptyCC.INSTANCE)
+    result = client.readRecords(request, cont)
+
+    # Синхронный результат?
+    if not _is_suspended(result) and result is not None:
+        return _process_read_response_blocking(result, ZoneId, db)
+
+    # Ждём callback
+    if not cont._event.wait(timeout=30):
+        return (False, "Таймаут HC SDK sync (30с)")
+
+    if cont._error:
+        return (False, str(cont._error))
+
+    return _process_read_response_blocking(cont._result, ZoneId, db)
+
+
+def _process_read_response_blocking(response, ZoneId, db):
+    """Обрабатывает ReadRecordsResponse (blocking)."""
+    records = response.getRecords()
+    zone = ZoneId.systemDefault()
+    steps_by_day = {}
+
+    for i in range(records.size()):
+        r = records.get(i)
+        local_date = r.getStartTime().atZone(zone).toLocalDate()
+        day = str(local_date.toString())
+        steps_by_day[day] = steps_by_day.get(day, 0) + int(r.getCount())
+
+    merged, total = _merge_steps_to_db(db, steps_by_day)
+    return (True, f"HC: {merged}/{total} дней обновлено")

@@ -52,6 +52,14 @@ class FitnessDB:
             )
         ''')
 
+        # Таблица достижения цели (одно уведомление в день)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS goal_state (
+                date TEXT PRIMARY KEY,
+                achieved INTEGER DEFAULT 0
+            )
+        ''')
+
         self.conn.commit()
         logger.debug("Таблицы БД проверены / созданы")
 
@@ -60,10 +68,21 @@ class FitnessDB:
         """Сохраняет или обновляет параметры пользователя на текущую дату"""
         today = datetime.now().strftime('%Y-%m-%d')
         cursor = self.conn.cursor()
+
+        # Проверяем, изменилась ли цель
+        cursor.execute('SELECT step_goal FROM user_metrics ORDER BY date DESC LIMIT 1')
+        old = cursor.fetchone()
+        goal_changed = old is None or old[0] != goal
+
         cursor.execute('''
             INSERT OR REPLACE INTO user_metrics (date, weight, height, step_goal)
             VALUES (?, ?, ?, ?)
         ''', (today, weight, height, goal))
+
+        if goal_changed:
+            cursor.execute('DELETE FROM goal_state WHERE date = ?', (today,))
+            logger.info(f"Цель изменена ({old[0] if old else '?'} → {goal}), флаг достижения сброшен")
+
         self.conn.commit()
         logger.info(f"Метрики сохранены: weight={weight}, height={height}, goal={goal}")
 
@@ -188,6 +207,29 @@ class FitnessDB:
         )
         row = cursor.fetchone()
         return (row[0], row[1], row[2]) if row else (0, 0.0, 0.0)
+
+    # Методы для отслеживания достижения цели
+
+    def get_goal_achieved(self, date):
+        """Возвращает True, если цель на указанную дату уже достигнута."""
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT achieved FROM goal_state WHERE date = ?', (date,))
+        row = cursor.fetchone()
+        return bool(row[0]) if row else False
+
+    def set_goal_achieved(self, date, achieved=True):
+        """Устанавливает флаг достижения цели на указанную дату."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            'INSERT OR REPLACE INTO goal_state (date, achieved) VALUES (?, ?)',
+            (date, 1 if achieved else 0))
+        self.conn.commit()
+
+    def reset_goal_achieved(self, date):
+        """Сбрасывает флаг достижения цели."""
+        cursor = self.conn.cursor()
+        cursor.execute('DELETE FROM goal_state WHERE date = ?', (date,))
+        self.conn.commit()
 
     def close(self):
         """Закрыть соединение с базой"""

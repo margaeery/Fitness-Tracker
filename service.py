@@ -147,7 +147,6 @@ class ServiceState:
         self.current_date = datetime.now().strftime('%Y-%m-%d')
         self.baseline = None
         self.steps = 0
-        self.goal_notified = False
         self.weight = 0.0
         self.height = 0.0
         self.goal = 0
@@ -197,13 +196,14 @@ class ServiceState:
         self.steps = new_steps
         self.dirty = True
 
-        # Проверяем достижение цели
-        if not self.goal_notified and self.goal > 0 and self.steps >= self.goal:
-            self.goal_notified = True
-            logger.info(f"Цель достигнута! {self.steps}/{self.goal}")
-            send_goal_notification()
-            # Принудительно сохраняем при достижении цели
-            self.save_to_db()
+        # Проверяем достижение цели (через БД — одно уведомление в день)
+        if self.goal > 0 and self.steps >= self.goal:
+            if not self.db.get_goal_achieved(self.current_date):
+                self.db.set_goal_achieved(self.current_date)
+                logger.info(f"Цель достигнута! {self.steps}/{self.goal}")
+                send_goal_notification()
+                # Принудительно сохраняем при достижении цели
+                self.save_to_db()
 
         return True
 
@@ -255,7 +255,6 @@ class ServiceState:
         self.current_date = today
         self.baseline = None
         self.steps = 0
-        self.goal_notified = False
         self.dirty = False
         self.last_save_time = time.time()
 
@@ -289,10 +288,10 @@ class ServiceState:
         if new_goal != self.goal:
             old_goal = self.goal
             self.weight, self.height, self.goal = metrics
-            # Сбрасываем флаг уведомления, чтобы оно могло прийти повторно
-            self.goal_notified = False
+            # Сбрасываем флаг уведомления в БД
+            self.db.reset_goal_achieved(self.current_date)
             logger.info(f"Цель изменена: {old_goal} → {self.goal}, "
-                        f"уведомление сброшено")
+                        f"флаг сброшен")
 
 
 # Точка входа сервиса  
@@ -397,9 +396,13 @@ def main():
     FG_CHECK  = 15    # проверка датчика каждые 15 сек
     FG_SAVE   = 15    # запись в БД каждые 15 сек (совпадает с check)
 
+    # HC sync из сервиса (в фоне ~10 мин)
+    HC_BG_INTERVAL = 600  # 10 мин
+
     current_mode = 'background'
     check_interval = BG_CHECK
     save_interval  = BG_SAVE
+    last_hc_sync = 0  # момент последнего HC sync из сервиса
 
     logger.info(f"Начальный режим: {current_mode} "
                 f"(check={check_interval}s, save={save_interval}s)")
@@ -438,6 +441,22 @@ def main():
             #  Периодическая запись в БД  
             if time.time() - state.last_save_time >= save_interval:
                 state.save_to_db()
+
+            # HC sync из сервиса (только в фоне, ~10 мин)
+            # В foreground HC sync делает основное приложение каждые 20с
+            if current_mode == 'background' and \
+               time.time() - last_hc_sync >= HC_BG_INTERVAL:
+                try:
+                    import health_connect as hc_mod
+                    svc_context = PythonService.mService
+                    success, msg = hc_mod.sync_from_hc_blocking(
+                        db, svc_context, days=1)
+                    logger.info(f"HC bg-sync: {success}, {msg}")
+                    if success:
+                        state.check_hc_sync()
+                except Exception as e:
+                    logger.debug(f"HC bg-sync: {e}")
+                last_hc_sync = time.time()
 
             #  Ждём до следующей проверки  
             time.sleep(check_interval)

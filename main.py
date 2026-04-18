@@ -386,20 +386,26 @@ class FitnessApp(App):
     # Периодическое обновление UI 
 
     def _start_ui_refresh(self):
-        """Запускает таймер обновления UI (каждые 15 секунд)."""
+        """Запускает таймер обновления UI (каждые 15 секунд) и HC sync (каждые 20 секунд)."""
         self._stop_ui_refresh()
         # Немедленное обновление при заходе
         if hasattr(self, 'main_screen'):
             self.main_screen.on_enter()
             logger.debug("Экран обновлён сразу")
         self._refresh_event = Clock.schedule_interval(self._refresh_ui, 15)
-        logger.debug("UI refresh timer запущен (15s)")
+        # Периодическая HC синхронизация каждые 20с при активном экране
+        self._hc_periodic_event = Clock.schedule_interval(
+            lambda dt: self._hc_auto_sync(), 20)
+        logger.debug("UI refresh (15s) + HC periodic sync (20s) запущены")
 
     def _stop_ui_refresh(self):
-        """Останавливает таймер обновления UI."""
+        """Останавливает таймеры обновления UI и HC sync."""
         if hasattr(self, '_refresh_event') and self._refresh_event:
             self._refresh_event.cancel()
             self._refresh_event = None
+        if hasattr(self, '_hc_periodic_event') and self._hc_periodic_event:
+            self._hc_periodic_event.cancel()
+            self._hc_periodic_event = None
 
     def _set_foreground_flag(self, active):
         """Создаёт/удаляет файл-флаг для сигнализации сервису."""
@@ -551,11 +557,14 @@ class FitnessApp(App):
         """Вызывается когда синхронизация завершена."""
         self._hc_set_btn_text("Health Connect")
         if success:
-            self._hc_auto_disabled = False  # разрешаем авто-синхронизацию
+            self._hc_auto_disabled = False
             self._hc_show_popup("Health Connect", message)
+            # Обновляем оба экрана (главный + графики)
             if hasattr(self, 'main_screen'):
                 self.main_screen.on_enter()
-                self._check_goal_after_hc()
+            if hasattr(self, 'stats_screen'):
+                self.stats_screen.update_stats()
+            self._check_goal_after_hc()
         else:
             # Понятное сообщение при отсутствии разрешений
             is_perm = any(w in message for w in ('SecurityException', 'PERMISSION', 'permission'))
@@ -585,14 +594,18 @@ class FitnessApp(App):
             logger.warning(f"HC auto-sync failed: {e}")
 
     def _hc_auto_sync_done(self, success, message):
-        """Тихое завершение авто-синхронизации — только обновляем UI."""
+        """Тихое завершение авто-синхронизации — обновляем UI."""
         self._hc_syncing = False
         logger.info(f"HC auto-sync: success={success}, {message}")
         if success:
             self._hc_auto_disabled = False
             if hasattr(self, 'main_screen'):
                 self.main_screen.on_enter()
-                self._check_goal_after_hc()
+            # Обновляем графики если они видимы
+            if hasattr(self, 'stats_screen') and hasattr(self, 'carousel'):
+                if self.carousel.index == 1:
+                    self.stats_screen.update_stats()
+            self._check_goal_after_hc()
         else:
             is_perm = any(w in message for w in ('SecurityException', 'PERMISSION', 'permission'))
             if is_perm:
@@ -600,8 +613,13 @@ class FitnessApp(App):
                 logger.info("HC auto-sync отключен: нет разрешений")
 
     def _check_goal_after_hc(self):
-        """Проверяет достижение цели после HC-синхронизации."""
+        """Проверяет достижение цели после HC-синхронизации.
+        Использует goal_state в БД для однократного уведомления."""
         try:
+            from datetime import datetime as _dt
+            today = _dt.now().strftime('%Y-%m-%d')
+            if self.db.get_goal_achieved(today):
+                return  # уже уведомлено сегодня
             metrics = self.db.get_latest_metrics()
             if not metrics:
                 return
@@ -610,6 +628,7 @@ class FitnessApp(App):
                 return
             today_steps = self.db.get_today_steps()
             if today_steps >= goal:
+                self.db.set_goal_achieved(today)
                 logger.info(f"HC sync: цель достигнута {today_steps}/{goal}")
                 self._send_goal_notification()
         except Exception as e:
