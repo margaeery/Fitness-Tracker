@@ -280,9 +280,11 @@ def _sync_platform(db, days, on_done):
         steps_total = StepsRecord.STEPS_COUNT_TOTAL
         AggReqBuilder = autoclass(
             'android.health.connect.AggregateRecordsRequest$Builder')
-        TimeInstantRangeFilterBuilder = autoclass(
-            'android.health.connect.TimeInstantRangeFilter$Builder')
-        Instant = autoclass('java.time.Instant')
+        LocalTimeRangeFilterBuilder = autoclass(
+            'android.health.connect.LocalTimeRangeFilter$Builder')
+        LocalDate = autoclass('java.time.LocalDate')
+        LocalDateTime = autoclass('java.time.LocalDateTime')
+        LocalTime = autoclass('java.time.LocalTime')
         Period = autoclass('java.time.Period')
         Executors = autoclass('java.util.concurrent.Executors')
 
@@ -302,12 +304,14 @@ def _sync_platform(db, days, on_done):
             raise RuntimeError(
                 "getSystemService(HealthConnectManager) вернул null")
 
-        # TimeInstantRangeFilter
-        end_ms = int(_time.time() * 1000)
-        start_ms = end_ms - days * 24 * 3600 * 1000
-        time_filter = TimeInstantRangeFilterBuilder() \
-            .setStartTime(Instant.ofEpochMilli(int(start_ms))) \
-            .setEndTime(Instant.ofEpochMilli(int(end_ms))) \
+        # LocalTimeRangeFilter (aggregateGroupByPeriod требует именно его)
+        today = LocalDate.now()
+        start_date = today.minusDays(days)
+        end_date = today.plusDays(1)
+        midnight = LocalTime.MIDNIGHT
+        time_filter = LocalTimeRangeFilterBuilder() \
+            .setStartTime(LocalDateTime.of(start_date, midnight)) \
+            .setEndTime(LocalDateTime.of(end_date, midnight)) \
             .build()
 
         # AggregateRecordsRequest с STEPS_COUNT_TOTAL
@@ -554,9 +558,11 @@ def _sync_platform_blocking(db, context, days):
     steps_total = StepsRecord.STEPS_COUNT_TOTAL
     AggReqBuilder = autoclass(
         'android.health.connect.AggregateRecordsRequest$Builder')
-    TimeInstantRangeFilterBuilder = autoclass(
-        'android.health.connect.TimeInstantRangeFilter$Builder')
-    Instant = autoclass('java.time.Instant')
+    LocalTimeRangeFilterBuilder = autoclass(
+        'android.health.connect.LocalTimeRangeFilter$Builder')
+    LocalDate = autoclass('java.time.LocalDate')
+    LocalDateTime = autoclass('java.time.LocalDateTime')
+    LocalTime = autoclass('java.time.LocalTime')
     Period = autoclass('java.time.Period')
     Executors = autoclass('java.util.concurrent.Executors')
 
@@ -570,11 +576,13 @@ def _sync_platform_blocking(db, context, days):
     if manager is None:
         return (False, "HealthConnectManager недоступен")
 
-    end_ms = int(_time.time() * 1000)
-    start_ms = end_ms - days * 24 * 3600 * 1000
-    time_filter = TimeInstantRangeFilterBuilder() \
-        .setStartTime(Instant.ofEpochMilli(int(start_ms))) \
-        .setEndTime(Instant.ofEpochMilli(int(end_ms))) \
+    today = LocalDate.now()
+    start_date = today.minusDays(days)
+    end_date = today.plusDays(1)
+    midnight = LocalTime.MIDNIGHT
+    time_filter = LocalTimeRangeFilterBuilder() \
+        .setStartTime(LocalDateTime.of(start_date, midnight)) \
+        .setEndTime(LocalDateTime.of(end_date, midnight)) \
         .build()
 
     agg_request = AggReqBuilder(time_filter) \
