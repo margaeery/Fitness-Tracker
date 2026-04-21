@@ -397,132 +397,132 @@ def _process_aggregate_response(response_list, steps_total, db, on_done):
 
 
 def _sync_sdk(db, days, on_done):
-    """API < 34: читаем шаги через HC SDK (connect-client) с Kotlin Continuation."""
+    """API < 34: шаги через HC SDK aggregateGroupByDuration (без пагинации)."""
     from kivy.clock import Clock
-    import time as _time
 
     try:
-        logger.info("HC sync: загружаем Java-классы на main thread...")
+        logger.info("HC sync (SDK): загружаем Java-классы...")
 
-        # ── Загружаем ВСЕ классы на главном потоке ──
+        from datetime import datetime as _dt, timedelta as _td
+
         PythonActivity = autoclass('org.kivy.android.PythonActivity')
         HCClient = autoclass(
             'androidx.health.connect.client.HealthConnectClient')
         Instant = autoclass('java.time.Instant')
+        Duration = autoclass('java.time.Duration')
+        ZoneId = autoclass('java.time.ZoneId')
         TimeRangeFilter = autoclass(
             'androidx.health.connect.client.time.TimeRangeFilter')
-        ReadRecordsRequest = autoclass(
-            'androidx.health.connect.client.request.ReadRecordsRequest')
-        JvmClassMappingKt = autoclass('kotlin.jvm.JvmClassMappingKt')
+        AggGroupByDurationReq = autoclass(
+            'androidx.health.connect.client.request'
+            '.AggregateGroupByDurationRequest')
+        StepsRecordSDK = autoclass(
+            'androidx.health.connect.client.records.StepsRecord')
         Collections = autoclass('java.util.Collections')
-        ZoneId = autoclass('java.time.ZoneId')
+        HashSet = autoclass('java.util.HashSet')
         EmptyCC = autoclass('kotlin.coroutines.EmptyCoroutineContext')
 
-        # StepsRecord через context classloader (для DEX-классов)
-        Thread = autoclass('java.lang.Thread')
-        cl = Thread.currentThread().getContextClassLoader()
-        steps_java_class = cl.loadClass(
-            'androidx.health.connect.client.records.StepsRecord')
-        kclass = JvmClassMappingKt.getKotlinClass(steps_java_class)
+        count_total = StepsRecordSDK.COUNT_TOTAL
 
-        logger.info("HC sync: классы загружены, получаем клиент...")
+        logger.info("HC sync (SDK): классы загружены, получаем клиент...")
 
-        # ── Получаем клиент ──
         context = PythonActivity.mActivity
         client = HCClient.getOrCreate(context)
 
-        # ── Строим запрос ──
-        end_ms = int(_time.time() * 1000)
-        start_ms = end_ms - days * 24 * 3600 * 1000
+        # Midnight-aligned time range через Instant.ofEpochMilli
+        now = _dt.now()
+        today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_ms = int((today_midnight - _td(days=days)).timestamp() * 1000)
+        end_ms = int((today_midnight + _td(days=1)).timestamp() * 1000)
 
-        start_instant = Instant.ofEpochMilli(int(start_ms))
-        end_instant = Instant.ofEpochMilli(int(end_ms))
-        time_filter = TimeRangeFilter.between(start_instant, end_instant)
+        time_filter = TimeRangeFilter.between(
+            Instant.ofEpochMilli(start_ms),
+            Instant.ofEpochMilli(end_ms))
 
-        request = ReadRecordsRequest(
-            kclass, time_filter, Collections.emptySet(),
-            True, 1000, None)
+        metrics = HashSet()
+        metrics.add(count_total)
 
-        logger.info("HC sync: запрос построен, создаём Continuation...")
+        agg_request = AggGroupByDurationReq(
+            metrics, time_filter, Duration.ofDays(1), Collections.emptySet())
 
-        # ── Создаём Continuation на ГЛАВНОМ потоке ──
+        logger.info("HC sync (SDK): запрос построен, вызываем "
+                     "aggregateGroupByDuration...")
+
         cont = _KotlinContinuation(EmptyCC.INSTANCE)
+        result = client.aggregateGroupByDuration(agg_request, cont)
 
-        logger.info("HC sync: вызываем readRecords...")
+        zone = ZoneId.systemDefault()
 
-        # ── Вызываем readRecords (non-blocking suspend) ──
-        result = client.readRecords(request, cont)
-
-        # Если результат пришёл синхронно (не suspended)
         if not _is_suspended(result) and result is not None:
-            logger.info("HC sync: результат получен синхронно")
-            _process_read_response(result, ZoneId, db, on_done)
+            logger.info("HC sync (SDK): результат получен синхронно")
+            _process_sdk_duration_response(
+                result, count_total, zone, db, on_done)
             return
 
-        logger.info("HC sync: функция suspended, ждём callback...")
+        logger.info("HC sync (SDK): функция suspended, ждём callback...")
 
-        # ── Ожидаем результат через polling ──
-        zone = ZoneId.systemDefault()
-        _poll_event = [None]  # ссылка на scheduled event для отмены
+        _poll_event = [None]
 
         def _check_result(dt):
             if not cont._event.is_set():
-                return  # ещё не готово, продолжаем polling
+                return
 
-            # Результат получен — отменяем polling
             if _poll_event[0]:
                 _poll_event[0].cancel()
                 _poll_event[0] = None
 
             if cont._error:
-                logger.error(f"HC readRecords error: {cont._error}")
+                logger.error(f"HC SDK aggregate error: {cont._error}")
                 if on_done:
                     on_done(False, cont._error)
                 return
 
             try:
-                _process_read_response(cont._result, ZoneId, db, on_done)
+                _process_sdk_duration_response(
+                    cont._result, count_total, zone, db, on_done)
             except Exception as e:
-                logger.error(f"HC process error: {e}", exc_info=True)
+                logger.error(f"HC SDK process error: {e}", exc_info=True)
                 if on_done:
                     on_done(False, str(e))
 
         _poll_event[0] = Clock.schedule_interval(_check_result, 0.2)
 
-        # Таймаут 30 секунд
         def _timeout(dt):
             if cont._event.is_set():
-                return  # уже обработано
+                return
             if _poll_event[0]:
                 _poll_event[0].cancel()
                 _poll_event[0] = None
-            logger.error("HC sync: таймаут 30с")
+            logger.error("HC sync (SDK): таймаут 30с")
             if on_done:
                 on_done(False, "Таймаут ожидания Health Connect (30с)")
 
         Clock.schedule_once(_timeout, 30)
 
     except Exception as e:
-        logger.error(f"HC sync error: {e}", exc_info=True)
+        logger.error(f"HC sync (SDK) error: {e}", exc_info=True)
         if on_done:
             on_done(False, str(e))
 
 
-def _process_read_response(response, ZoneId, db, on_done):
-    """Обрабатывает ReadRecordsResponse — извлекает шаги, пишет в БД."""
-    records = response.getRecords()
-    zone = ZoneId.systemDefault()
+def _process_sdk_duration_response(response_list, count_total, zone,
+                                    db, on_done):
+    """Обрабатывает List<AggregationResultGroupedByDuration> от SDK."""
     steps_by_day = {}
 
-    for i in range(records.size()):
-        r = records.get(i)
-        local_date = r.getStartTime().atZone(zone).toLocalDate()
+    for i in range(response_list.size()):
+        group = response_list.get(i)
+        # getStartTime() → Instant, конвертируем в локальную дату
+        local_date = group.getStartTime().atZone(zone).toLocalDate()
         day = str(local_date.toString())
-        steps_by_day[day] = steps_by_day.get(day, 0) + int(r.getCount())
+        agg_result = group.getResult()
+        steps_val = agg_result.get(count_total)
+        if steps_val is not None:
+            steps_by_day[day] = int(steps_val)
 
     merged, total = _merge_steps_to_db(db, steps_by_day)
     msg = f"Обновлено {merged} записей из {total} дней Health Connect"
-    logger.info(f"HC sync: {msg}")
+    logger.info(f"HC sync (SDK): {msg}")
     if on_done:
         on_done(True, msg)
 
@@ -613,65 +613,74 @@ def _sync_platform_blocking(db, context, days):
 
 
 def _sync_sdk_blocking(db, context, days):
-    """Блокирующий вариант SDK sync (API < 34)."""
-    import time as _time
+    """Блокирующий вариант SDK sync (API < 34) через aggregateGroupByDuration."""
+    from datetime import datetime as _dt, timedelta as _td
 
     HCClient = autoclass('androidx.health.connect.client.HealthConnectClient')
     Instant = autoclass('java.time.Instant')
+    Duration = autoclass('java.time.Duration')
+    ZoneId = autoclass('java.time.ZoneId')
     TimeRangeFilter = autoclass(
         'androidx.health.connect.client.time.TimeRangeFilter')
-    ReadRecordsRequest = autoclass(
-        'androidx.health.connect.client.request.ReadRecordsRequest')
-    JvmClassMappingKt = autoclass('kotlin.jvm.JvmClassMappingKt')
+    AggGroupByDurationReq = autoclass(
+        'androidx.health.connect.client.request'
+        '.AggregateGroupByDurationRequest')
+    StepsRecordSDK = autoclass(
+        'androidx.health.connect.client.records.StepsRecord')
     Collections = autoclass('java.util.Collections')
-    ZoneId = autoclass('java.time.ZoneId')
+    HashSet = autoclass('java.util.HashSet')
     EmptyCC = autoclass('kotlin.coroutines.EmptyCoroutineContext')
 
-    Thread = autoclass('java.lang.Thread')
-    cl = Thread.currentThread().getContextClassLoader()
-    steps_java_class = cl.loadClass(
-        'androidx.health.connect.client.records.StepsRecord')
-    kclass = JvmClassMappingKt.getKotlinClass(steps_java_class)
+    count_total = StepsRecordSDK.COUNT_TOTAL
 
     client = HCClient.getOrCreate(context)
 
-    end_ms = int(_time.time() * 1000)
-    start_ms = end_ms - days * 24 * 3600 * 1000
-    time_filter = TimeRangeFilter.between(
-        Instant.ofEpochMilli(int(start_ms)),
-        Instant.ofEpochMilli(int(end_ms)))
+    # Midnight-aligned time range через Instant.ofEpochMilli
+    now = _dt.now()
+    today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_ms = int((today_midnight - _td(days=days)).timestamp() * 1000)
+    end_ms = int((today_midnight + _td(days=1)).timestamp() * 1000)
 
-    request = ReadRecordsRequest(
-        kclass, time_filter, Collections.emptySet(), True, 1000, None)
+    time_filter = TimeRangeFilter.between(
+        Instant.ofEpochMilli(start_ms),
+        Instant.ofEpochMilli(end_ms))
+
+    metrics = HashSet()
+    metrics.add(count_total)
+
+    agg_request = AggGroupByDurationReq(
+        metrics, time_filter, Duration.ofDays(1), Collections.emptySet())
 
     cont = _KotlinContinuation(EmptyCC.INSTANCE)
-    result = client.readRecords(request, cont)
+    result = client.aggregateGroupByDuration(agg_request, cont)
 
-    # Синхронный результат?
+    zone = ZoneId.systemDefault()
+
     if not _is_suspended(result) and result is not None:
-        return _process_read_response_blocking(result, ZoneId, db)
+        return _process_sdk_duration_blocking(result, count_total, zone, db)
 
-    # Ждём callback
     if not cont._event.wait(timeout=30):
         return (False, "Таймаут HC SDK sync (30с)")
 
     if cont._error:
         return (False, str(cont._error))
 
-    return _process_read_response_blocking(cont._result, ZoneId, db)
+    return _process_sdk_duration_blocking(
+        cont._result, count_total, zone, db)
 
 
-def _process_read_response_blocking(response, ZoneId, db):
-    """Обрабатывает ReadRecordsResponse (blocking)."""
-    records = response.getRecords()
-    zone = ZoneId.systemDefault()
+def _process_sdk_duration_blocking(response_list, count_total, zone, db):
+    """Обрабатывает List<AggregationResultGroupedByDuration> (blocking)."""
     steps_by_day = {}
 
-    for i in range(records.size()):
-        r = records.get(i)
-        local_date = r.getStartTime().atZone(zone).toLocalDate()
+    for i in range(response_list.size()):
+        group = response_list.get(i)
+        local_date = group.getStartTime().atZone(zone).toLocalDate()
         day = str(local_date.toString())
-        steps_by_day[day] = steps_by_day.get(day, 0) + int(r.getCount())
+        agg_result = group.getResult()
+        steps_val = agg_result.get(count_total)
+        if steps_val is not None:
+            steps_by_day[day] = int(steps_val)
 
     merged, total = _merge_steps_to_db(db, steps_by_day)
     return (True, f"HC: {merged}/{total} дней обновлено")

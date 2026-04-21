@@ -386,16 +386,16 @@ class FitnessApp(App):
     # Периодическое обновление UI 
 
     def _start_ui_refresh(self):
-        """Запускает таймер обновления UI (каждые 15 секунд) и HC sync (каждые 20 секунд)."""
+        """Запускает таймер обновления UI (каждые 15 секунд) и HC sync (каждые 10 секунд)."""
         self._stop_ui_refresh()
         # Немедленное обновление при заходе
         if hasattr(self, 'main_screen'):
             self.main_screen.on_enter()
             logger.debug("Экран обновлён сразу")
         self._refresh_event = Clock.schedule_interval(self._refresh_ui, 15)
-        # Периодическая HC синхронизация каждые 20с при активном экране
+        # Периодическая HC синхронизация каждые 10с при активном экране
         self._hc_periodic_event = Clock.schedule_interval(
-            lambda dt: self._hc_auto_sync(), 20)
+            lambda dt: self._hc_auto_sync(), 10)
         logger.debug("UI refresh (15s) + HC periodic sync (20s) запущены")
 
     def _stop_ui_refresh(self):
