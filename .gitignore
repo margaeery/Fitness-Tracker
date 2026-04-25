@@ -1,3 +1,5 @@
 .buildozer/
 __pycache__/
 *.db
+.vscode
+.pytest_cache/
