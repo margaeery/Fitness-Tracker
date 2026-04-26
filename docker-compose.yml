@@ -1,0 +1,20 @@
+services:
+  build:
+    build: .
+    volumes:
+      - buildozer-cache:/home/user/.buildozer
+      - .:/home/user/hostcwd
+    environment:
+      - BUILDOZER_ALLOW_ROOT=1
+
+  test:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: >
+      bash -c "pip install --quiet pytest pytest-cov &&
+               python -m pytest tests/ -v --tb=short"
+
+volumes:
+  buildozer-cache:

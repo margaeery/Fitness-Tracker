@@ -1,0 +1,9 @@
+.buildozer/
+.git/
+.pytest_cache/
+__pycache__/
+bin/
+tests/
+*.db
+*.pyc
+.vscode/
