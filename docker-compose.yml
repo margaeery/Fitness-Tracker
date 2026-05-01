@@ -2,7 +2,7 @@ services:
   build:
     build: .
     volumes:
-      - buildozer-cache:/home/user/.buildozer
+      - buildozer-cache:/root/.buildozer
       - .:/home/user/hostcwd
     environment:
       - BUILDOZER_ALLOW_ROOT=1
