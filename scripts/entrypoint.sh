@@ -10,7 +10,10 @@ set -e
 
 cd /home/user/hostcwd
 
-MARKER="$HOME/.buildozer/.patches_applied"
+PROJECT_BUILDOZER_DIR="/home/user/hostcwd/.buildozer"
+MARKER="$PROJECT_BUILDOZER_DIR/.patches_applied"
+
+mkdir -p "$PROJECT_BUILDOZER_DIR"
 
 if [ -f "$MARKER" ]; then
     echo "=== Патчи уже применены, собираем APK ==="
