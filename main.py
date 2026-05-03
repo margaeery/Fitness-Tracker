@@ -208,7 +208,7 @@ class FitnessApp(App):
             return
         self._set_foreground_flag(True)
         self._start_ui_refresh()
-        # Тихая авто-синхронизация HC при возврате из фона (один раз)
+        # Авто-синхронизация с HC
         self._hc_auto_sync()
 
     # Разрешения и запуск сервиса
@@ -378,7 +378,7 @@ class FitnessApp(App):
             self._set_foreground_flag(True)
             # Начинаем обновлять UI из БД
             self._start_ui_refresh()
-            # Тихая автосинхронизация с HC при запуске (если разрешения уже есть)
+            # Автоматическая синхронизация с HC при запуске (если разрешения уже есть)
             self._hc_auto_sync()
         except Exception as e:
             logger.error(f"Ошибка запуска сервиса: {e}", exc_info=True)
@@ -427,7 +427,7 @@ class FitnessApp(App):
             if self.carousel.index == 0:
                 self.main_screen.on_enter()
 
-    # ── Health Connect ────────────────────────────────────────────────────
+    # Health Connect 
 
     def hc_connect(self):
         """Нажатие кнопки Health Connect.
@@ -480,15 +480,7 @@ class FitnessApp(App):
             self._hc_show_popup("Ошибка", str(e))
 
     def _hc_request_permissions_runtime(self):
-        """API 34+: запрашиваем HC-разрешения как стандартные runtime permissions.
-
-        На API 34+ HC — часть системы. Мы используем платформенный
-        HealthConnectManager (не SDK content provider), который проверяет
-        стандартные Android runtime permissions. Поэтому requestPermissions()
-        здесь — правильный и достаточный подход.
-
-        Fallback: если requestPermissions() не сработает — открываем
-        настройки HC через intent."""
+        """API 34+: запрашиваем HC-разрешения как стандартные runtime permissions."""
         logger.info("HC: requestPermissions (runtime) для API 34+")
         from android.permissions import request_permissions
         self._hc_waiting_permissions = True
@@ -576,7 +568,7 @@ class FitnessApp(App):
                 self._hc_show_popup("Ошибка", message)
 
     def _hc_auto_sync(self):
-        """Тихая синхронизация (1 день), если HC доступен."""
+        """Автоматическая синхронизация (1 день), если HC доступен."""
         if not ANDROID:
             return
         if getattr(self, '_hc_auto_disabled', False):
@@ -594,7 +586,7 @@ class FitnessApp(App):
             logger.warning(f"HC auto-sync failed: {e}")
 
     def _hc_auto_sync_done(self, success, message):
-        """Тихое завершение авто-синхронизации — обновляем UI."""
+        """Завершение авто-синхронизации — обновляем UI."""
         self._hc_syncing = False
         logger.info(f"HC auto-sync: success={success}, {message}")
         if success:
@@ -669,7 +661,7 @@ class FitnessApp(App):
         try:
             self.main_screen.ids.hc_btn.text = text
         except Exception:
-            pass  # не критично если кнопка недоступна
+            pass
 
     def _hc_show_popup(self, title, message):
         """Показывает информационный попап с результатом HC операции.

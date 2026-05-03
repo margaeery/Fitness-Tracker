@@ -1,10 +1,6 @@
 """
 Интеграция с Health Connect (Android).
 
-Полностью асинхронный подход — ВСЕ Java/Kotlin операции
-выполняются на ГЛАВНОМ потоке Kivy (где classloader видит DEX).
-Результат Kotlin suspend-функций получаем через Continuation + Clock polling.
-
 Предоставляет:
   is_available()            – HC доступен на устройстве
   has_read_permissions()    – разрешения на чтение уже выданы
@@ -37,7 +33,7 @@ _HC_PROVIDER_PACKAGES = [
 ]
 
 
-# ── Определение платформы ─────────────────────────────────────────────
+# Определение платформы 
 
 def _get_sdk_int():
     """Возвращает API level устройства."""
@@ -118,14 +114,11 @@ def has_read_permissions():
         return False
 
 
-# ── Continuation (Java → Python callback) ────────────────────────────
+# Java → Python callback
 
 if ANDROID:
     class _KotlinContinuation(PythonJavaClass):
-        """kotlin.coroutines.Continuation для вызова suspend-функций.
-        ДОЛЖЕН создаваться на MAIN THREAD — pyjnius при создании
-        Java-прокси ищет kotlin.coroutines.Continuation через classloader
-        текущего потока. Фоновые потоки не видят DEX-классы."""
+
         __javainterfaces__ = ['kotlin/coroutines/Continuation']
         __javacontext__ = 'app'
 
@@ -153,8 +146,10 @@ if ANDROID:
             self._event.set()
 
     class _PlatformOutcomeReceiver(PythonJavaClass):
-        """android.os.OutcomeReceiver для платформенного HealthConnectManager (API 34+).
-        Через type erasure: onResult(Object), onError(Throwable)."""
+        """Мост для платформенного HealthConnectManager (Android API 34+).
+        
+        Получает результат или ошибку от асинхронного запроса Health Connect.
+        """
         __javainterfaces__ = ['android/os/OutcomeReceiver']
         __javacontext__ = 'app'
 
@@ -178,7 +173,7 @@ if ANDROID:
             self._event.set()
 
 
-# ── Утилиты ──────────────────────────────────────────────────────────
+#  Утилиты
 
 # Файл-флаг для сигнала сервису о том, что HC обновил данные
 from database import DB_PATH as _DB_PATH
@@ -234,11 +229,11 @@ def _is_suspended(result):
         return False
 
 
-# ── Главная функция синхронизации (main thread, async) ───────────────
+# Главная функция синхронизации 
 
 def sync_from_hc(db, days=30, on_done=None):
     """
-    Читает шаги из Health Connect за последние ``days`` дней.
+    Читает шаги из Health Connect за последние 30 дней.
     Дистанция и калории вычисляются локально через FitnessCalculator.
 
     ВСЕ Java-вызовы на ГЛАВНОМ потоке (classloader видит DEX).
@@ -247,7 +242,6 @@ def sync_from_hc(db, days=30, on_done=None):
              (не зависит от SDK-библиотеки, проверяет стандартные Android permissions).
     API < 34: используем HC SDK (connect-client) через Kotlin Continuation.
 
-    on_done(success: bool, message: str) вызывается в главном потоке.
     """
     if not ANDROID:
         if on_done:
@@ -264,8 +258,7 @@ def sync_from_hc(db, days=30, on_done=None):
 def _sync_platform(db, days, on_done):
     """API 34+: читаем шаги через платформенный HealthConnectManager.
 
-    Используем aggregateGroupByPeriod вместо readRecords — HC сам
-    дедуплицирует данные из нескольких источников (без удвоения)."""
+    Используем aggregateGroupByPeriod вместо readRecords"""
     from kivy.clock import Clock
     import time as _time
 
@@ -326,12 +319,11 @@ def _sync_platform(db, days, on_done):
         receiver = _PlatformOutcomeReceiver()
         executor = Executors.newSingleThreadExecutor()
 
-        # aggregateGroupByPeriod — дедуплицирует автоматически
         manager.aggregateGroupByPeriod(agg_request, one_day, executor, receiver)
 
         logger.info("HC sync (platform): ждём callback...")
 
-        # Polling для результата
+        # Ожидание результата
         _poll_event = [None]
 
         def _check_result(dt):
@@ -397,7 +389,7 @@ def _process_aggregate_response(response_list, steps_total, db, on_done):
 
 
 def _sync_sdk(db, days, on_done):
-    """API < 34: шаги через HC SDK aggregateGroupByDuration (без пагинации)."""
+    """API < 34: шаги через HC SDK aggregateGroupByDuration"""
     from kivy.clock import Clock
 
     try:
@@ -429,7 +421,7 @@ def _sync_sdk(db, days, on_done):
         context = PythonActivity.mActivity
         client = HCClient.getOrCreate(context)
 
-        # Midnight-aligned time range через Instant.ofEpochMilli
+        # Временной диапазон от полуночи до полуночи
         now = _dt.now()
         today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
         start_ms = int((today_midnight - _td(days=days)).timestamp() * 1000)
@@ -527,7 +519,7 @@ def _process_sdk_duration_response(response_list, count_total, zone,
         on_done(True, msg)
 
 
-# ── Блокирующая синхронизация (для фонового сервиса) ─────────────────
+# Блокирующая синхронизация (для фонового сервиса)
 
 def sync_from_hc_blocking(db, context, days=1):
     """Блокирующая синхронизация с HC (для вызова из сервиса без Kivy Clock).
@@ -635,7 +627,7 @@ def _sync_sdk_blocking(db, context, days):
 
     client = HCClient.getOrCreate(context)
 
-    # Midnight-aligned time range через Instant.ofEpochMilli
+    # Временной диапазон от полуночи до полуночи
     now = _dt.now()
     today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     start_ms = int((today_midnight - _td(days=days)).timestamp() * 1000)
@@ -653,7 +645,10 @@ def _sync_sdk_blocking(db, context, days):
 
     cont = _KotlinContinuation(EmptyCC.INSTANCE)
     result = client.aggregateGroupByDuration(agg_request, cont)
-
+    """Мост между Kotlin suspend-функцией и Python.
+    
+    Позволяет дождаться результата асинхронного вызова Health Connect SDK.
+    """
     zone = ZoneId.systemDefault()
 
     if not _is_suspended(result) and result is not None:

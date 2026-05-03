@@ -5,12 +5,12 @@ import os
 import types
 import pytest
 
-# ─── Добавляем корень проекта в sys.path ──────────────────────────────
+# Добавляем корень проекта в sys.path 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-# ─── Мок андроид-модулей, которых нет на десктопе ─────────────────────
+# Мок андроид-модулей, которых нет на десктопе 
 # Создаём заглушки ДО импорта модулей проекта.
 
 _android_mod = types.ModuleType('android')
@@ -43,7 +43,7 @@ for mod_name, mod_obj in [
     sys.modules.setdefault(mod_name, mod_obj)
 
 
-# ─── Фикстуры ────────────────────────────────────────────────────────
+# Фикстуры 
 
 @pytest.fixture
 def tmp_db(tmp_path):
