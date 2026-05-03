@@ -11,15 +11,6 @@ Python + Kivy + HealthConnect
 ## Оглавление
 
 - [Возможности](#возможности)
-- [Архитектура](#архитектура)
-  - [C4 — контекст системы](#c4--контекст-системы)
-  - [C4 — контейнеры](#c4--контейнеры)
-  - [Диаграмма компонентов](#диаграмма-компонентов)
-  - [Диаграмма классов](#диаграмма-классов)
-  - [Поток данных шагов](#поток-данных-шагов)
-  - [Последовательность синхронизации HC](#последовательность-синхронизации-hc)
-  - [Жизненный цикл приложения](#жизненный-цикл-приложения)
-  - [Схема базы данных](#схема-базы-данных)
 - [API модулей](#api-модулей)
 - [Структура проекта](#структура-проекта)
 - [Сборка и запуск](#сборка-и-запуск)
@@ -40,324 +31,6 @@ Python + Kivy + HealthConnect
 - Графики активности (неделя / месяц / год)
 - Push-уведомление при достижении дневной цели
 - Автоматический перезапуск сервиса при убийстве процесса
-
----
-
-## Архитектура
-
-### C4 — контекст системы
-
-```mermaid
-flowchart TD
-    user(["Пользователь\n(Android-устройство)"])
-    app["FitnessTracker\nKivy / Python"]
-    hc["Health Connect\nСервис агрегации\nданных здоровья"]
-    sensor["Аппаратный датчик\nTYPE_STEP_COUNTER"]
-
-    user -- "Просматривает статистику,\nнастраивает профиль" --> app
-    app -- "Читает агрегированные шаги\n(HC SDK / Platform API)" --> hc
-    app -- "SensorEventListener" --> sensor
-    hc -. "Данные шагов из\nвсех источников" .-> app
-
-    style app fill:#1565C0,color:#fff
-    style hc fill:#E65100,color:#fff
-    style sensor fill:#616161,color:#fff
-    style user fill:#2E7D32,color:#fff
-```
-
-### C4 — контейнеры
-
-```mermaid
-flowchart TD
-    user(["Пользователь"])
-
-    subgraph device ["Android-устройство"]
-        ui["UI-процесс\n(main.py, Kivy)"]
-        svc["Фоновый сервис\n(service.py, отдельный процесс)"]
-        db[("SQLite\nfitness_data.db")]
-        hc_mod["health_connect.py\n(pyjnius)"]
-
-        ui -- "Чтение данных" --> db
-        ui -- "sync_from_hc()" --> hc_mod
-        svc -- "Запись шагов" --> db
-        svc -- "sync_from_hc_blocking()" --> hc_mod
-        hc_mod -- "_merge_steps_to_db()" --> db
-        ui -. ".app_foreground\n(файл-флаг)" .-> svc
-    end
-
-    hc_ext["Health Connect"]
-    sensor_ext["TYPE_STEP_COUNTER"]
-
-    user --> ui
-    svc -- "SensorEventListener" --> sensor_ext
-    hc_mod -- "aggregateGroupBy\nDuration / Period" --> hc_ext
-
-    style ui fill:#1565C0,color:#fff
-    style svc fill:#E65100,color:#fff
-    style db fill:#2E7D32,color:#fff
-    style hc_mod fill:#6A1B9A,color:#fff
-    style hc_ext fill:#E65100,color:#fff
-    style sensor_ext fill:#616161,color:#fff
-```
-
-### Диаграмма компонентов
-
-```mermaid
-graph TB
-    subgraph UI ["UI-процесс (main.py)"]
-        A[FitnessApp] --> B[MainScreen]
-        A --> C[StatsScreen]
-        A --> D[SetupScreen]
-        B --> G[ActivityChart]
-    end
-
-    subgraph SVC ["Фоновый сервис (service.py)"]
-        H["main()"] --> I[ServiceState]
-        H --> J[StepSensorListener]
-        I --> K["send_goal_notification()"]
-    end
-
-    subgraph SHARED ["Общие модули"]
-        L[(SQLite DB)]
-        M[FitnessDB]
-        N[FitnessCalculator]
-        F[health_connect]
-    end
-
-    A -->|"sync_from_hc()"| F
-    H -->|"sync_from_hc_blocking()"| F
-    A --> M
-    I --> M
-    I --> N
-    B --> N
-    F --> M
-    F --> N
-    M --> L
-
-    style A fill:#1565C0,color:#fff
-    style H fill:#E65100,color:#fff
-    style L fill:#2E7D32,color:#fff
-```
-
-### Диаграмма классов
-
-```mermaid
-classDiagram
-    class FitnessApp {
-        +db: FitnessDB
-        +main_screen: MainScreen
-        +stats_screen: StatsScreen
-        +carousel: Carousel
-        +build() Widget
-        +on_pause() bool
-        +on_resume()
-        +hc_connect()
-        -_start_service()
-        -_hc_sync()
-        -_hc_auto_sync()
-        -_refresh_ui(dt)
-    }
-
-    class FitnessDB {
-        +conn: sqlite3.Connection
-        +save_user_metrics(weight, height, goal)
-        +get_latest_metrics() tuple|None
-        +add_steps(steps_to_add)
-        +get_today_steps() int
-        +update_day_activity(date, steps, dist, kcal)
-        +get_activity_for_date(date) tuple
-        +get_data_for_range(start, end) tuple
-        +get_year_data_for_specific_year(year) tuple
-        +save_sensor_baseline(date, baseline)
-        +get_sensor_baseline(date) int|None
-        +delete_sensor_baseline(date)
-        +get_goal_achieved(date) bool
-        +set_goal_achieved(date)
-        +reset_goal_achieved(date)
-        +close()
-    }
-
-    class FitnessCalculator {
-        +calculate_distance(steps, height)$ float
-        +calculate_calories(steps, weight)$ float
-    }
-
-    class ServiceState {
-        +db: FitnessDB
-        +current_date: str
-        +baseline: int|None
-        +steps: int
-        +weight: float
-        +height: float
-        +goal: int
-        +dirty: bool
-        +process_sensor(sensor_value) bool
-        +save_to_db()
-        +handle_midnight()
-        +check_hc_sync()
-        +check_goal_change()
-    }
-
-    class StepCounter {
-        +db: FitnessDB
-        +is_running: bool
-        +start(callback)
-        +stop()
-        -_on_sensor_event(value)
-        -_process_step(sensor_value)
-    }
-
-    class HealthConnect {
-        +is_available()$ bool
-        +has_read_permissions()$ bool
-        +sync_from_hc(db, days, on_done)$
-        +sync_from_hc_blocking(db, context, days)$ tuple
-        -_merge_steps_to_db(db, steps_by_day)$ tuple
-        -_sync_platform(db, days, on_done)$
-        -_sync_sdk(db, days, on_done)$
-    }
-
-    FitnessApp --> FitnessDB
-    FitnessApp --> HealthConnect
-    ServiceState --> FitnessDB
-    ServiceState --> FitnessCalculator
-    StepCounter --> FitnessDB
-    StepCounter --> FitnessCalculator
-    HealthConnect --> FitnessDB
-    HealthConnect --> FitnessCalculator
-```
-
-### Поток данных шагов
-
-```mermaid
-flowchart LR
-    SENSOR["TYPE_STEP_COUNTER\n(абсолютное значение)"]
-    LISTENER["StepSensorListener\nonSensorChanged()"]
-    STATE["ServiceState\nprocess_sensor()"]
-    CALC["FitnessCalculator\ndistance + calories"]
-    DB[("SQLite\ndaily_activity")]
-    HC["Health Connect\naggregateGroupBy..."]
-    MERGE["_merge_steps_to_db()\nmax(hc, local)"]
-    UI["MainScreen\nStatsScreen"]
-
-    SENSOR --> LISTENER --> STATE
-    STATE <-- "dist, kcal" --- CALC
-    STATE -- "save_to_db()" --> DB
-    HC -- "шаги по дням" --> MERGE
-    MERGE -- "только если hc > local" --> DB
-    DB -- "get_today_steps()" --> UI
-```
-
-### Последовательность синхронизации HC
-
-```mermaid
-sequenceDiagram
-    participant App as FitnessApp
-    participant HC as health_connect
-    participant SDK as HC SDK / Platform API
-    participant DB as SQLite
-
-    App->>HC: sync_from_hc(db, days=30)
-    
-    alt API ≥ 34
-        HC->>SDK: HealthConnectManager.aggregateGroupByPeriod()
-        SDK-->>HC: AggregateGroupByPeriodResult[]
-    else API < 34
-        HC->>SDK: HealthConnectClient.aggregateGroupByDuration()
-        SDK-->>HC: AggregateGroupByDurationResult[]
-    end
-    
-    HC->>HC: Парсинг результата → {date: steps}
-    HC->>DB: _merge_steps_to_db()
-    
-    loop Для каждого дня
-        HC->>DB: get_activity_for_date(date)
-        alt hc_steps > local_steps
-            HC->>DB: update_day_activity(date, hc_steps, dist, kcal)
-        end
-    end
-
-    opt Сегодняшний день обновлён
-        HC->>DB: delete_sensor_baseline(today)
-        HC->>HC: Создать .hc_sync флаг-файл
-    end
-
-    HC-->>App: on_done(True, "Обновлено N дней")
-    App->>App: Обновить UI
-```
-
-### Жизненный цикл приложения
-
-> **Сервис работает в отдельном Android-процессе** (`android:process=":service_Stepservice"`).
-> Даже если приложение полностью закрыто (`on_stop`), сервис продолжает считать шаги
-> и отправлять push-уведомления. При убийстве процесса системой —
-> `setAutoRestartService(True)` автоматически перезапускает сервис.
-
-```mermaid
-flowchart TD
-    subgraph UI ["UI-процесс (main.py)"]
-        START(["Запуск"]) --> CHECK{"Есть\nпрофиль?"}
-        CHECK -->|Нет| SETUP["SetupScreen\nsave_profile()"]
-        SETUP --> PERM["Запрос разрешений"]
-        CHECK -->|Да| PERM
-        PERM --> ACTIVE["Активен\n(на экране)"]
-        ACTIVE -->|"on_pause()"| PAUSED["Свёрнут"]
-        PAUSED -->|"on_resume()"| ACTIVE
-        ACTIVE -->|"on_stop()"| CLOSED["Закрыт"]
-        PAUSED -->|"on_stop()"| CLOSED
-        CLOSED -->|"Повторный запуск"| ACTIVE
-    end
-
-    subgraph SVC ["Фоновый сервис (отдельный Android-процесс)"]
-        SVC_FG["Foreground-режим\nДатчик: каждые 10 сек\nБД: каждые 15 сек\nHC sync: каждые 10 сек"]
-        SVC_BG["Background-режим\nДатчик: каждые 60 сек\nБД: каждые 10 мин\nHC sync: каждые 10 мин"]
-        SVC_KILLED["Убит системой\n(OOM / ресурсы)"]
-        SVC_FG -->|".app_foreground удалён"| SVC_BG
-        SVC_BG -->|".app_foreground создан"| SVC_FG
-        SVC_BG --> SVC_KILLED
-        SVC_KILLED -->|"setAutoRestartService(True)"| SVC_BG
-    end
-
-    ACTIVE -.->|"создаёт .app_foreground\n+ запускает сервис"| SVC_FG
-    PAUSED -.->|"удаляет .app_foreground"| SVC_BG
-    CLOSED -.->|"Сервис продолжает\nработу автономно"| SVC_BG
-
-    style ACTIVE fill:#1565C0,color:#fff
-    style PAUSED fill:#F9A825,color:#000
-    style CLOSED fill:#616161,color:#fff
-    style SVC_FG fill:#1565C0,color:#fff
-    style SVC_BG fill:#E65100,color:#fff
-    style SVC_KILLED fill:#B71C1C,color:#fff
-```
-
-### Схема базы данных
-
-```mermaid
-erDiagram
-    daily_activity {
-        TEXT date PK "YYYY-MM-DD"
-        INTEGER steps "Шаги за день"
-        REAL distance "Дистанция (км)"
-        REAL calories "Калории (ккал)"
-    }
-
-    user_metrics {
-        TEXT date PK "YYYY-MM-DD"
-        REAL weight "Вес (кг)"
-        REAL height "Рост (см)"
-        INTEGER step_goal "Дневная цель"
-    }
-
-    sensor_state {
-        TEXT date PK "YYYY-MM-DD"
-        INTEGER baseline "Начальное значение датчика"
-    }
-
-    goal_state {
-        TEXT date PK "YYYY-MM-DD"
-        INTEGER achieved "1 = цель достигнута"
-    }
-```
 
 ---
 
@@ -497,6 +170,7 @@ docker compose run --rm build
 - Первый запуск: скачивает Android SDK, NDK, python-for-android (~20–30 мин)
 - Автоматически применяет патчи Health Connect (intent-filters, kotlin exclusion)
 - Кэш сохраняется в Docker volume `buildozer-cache` — повторные сборки быстрее
+- Временная область сборки создаётся в локальном каталоге `.buildozer/` проекта и патчится автоматически
 - APK появляется в `bin/`
 
 **Тесты в контейнере:**
@@ -530,6 +204,58 @@ buildozer android debug
 
 Docker Compose автоматизирует эти шаги через `scripts/entrypoint.sh`.
 
+### Запуск на ПК
+
+Приложение можно запустить на Windows/Linux/macOS как обычное Kivy-приложение,
+чтобы посмотреть интерфейс без Android-устройства.
+
+Что работает на ПК:
+- экраны `SetupScreen`, `MainScreen`, `StatsScreen`
+- локальная SQLite-база
+- графики и обновление данных из БД
+
+Что не работает на ПК:
+- аппаратный датчик `TYPE_STEP_COUNTER`
+- фоновый Android-сервис
+- реальные Android-разрешения
+- реальная синхронизация с Health Connect
+
+**Минимальные зависимости для desktop-просмотра:**
+
+```powershell
+pip install kivy
+```
+
+**Запуск интерфейса:**
+
+```powershell
+python main.py
+```
+
+При первом запуске приложение откроет экран настройки профиля. После сохранения
+профиля можно смотреть главный экран и графики, но шаги на ПК сами по себе
+обновляться не будут, потому что датчик и Android-сервис недоступны.
+
+### Заполнение БД тестовыми данными
+
+Для просмотра графиков и состояния интерфейса на ПК можно заранее заполнить БД
+тестовой активностью.
+
+Порядок действий:
+1. Один раз запустите `python main.py` и сохраните профиль пользователя.
+2. Закройте приложение.
+3. Выполните скрипт генерации тестовых данных.
+4. Снова запустите `python main.py`.
+
+```powershell
+python fill_test_data.py
+```
+
+Скрипт `fill_test_data.py` генерирует записи в `daily_activity` за 2026 год,
+используя текущие параметры пользователя из `user_metrics` для расчёта
+дистанции и калорий. Если профиль ещё не создан, скрипт завершится с сообщением
+`Сначала запустите приложение и настройте профиль!`.
+
 ### Установка APK на устройство
 
 ```powershell
@@ -544,6 +270,14 @@ Docker Compose автоматизирует эти шаги через `scripts/
 
 ## Тестирование
 
+### Локальный запуск без Docker
+
+**Минимальные зависимости для тестов:**
+
+```powershell
+pip install pytest pytest-cov
+```
+
 ```bash
 # Запуск всех тестов
 python -m pytest tests/ -v
@@ -553,6 +287,13 @@ python -m pytest tests/ --cov=. --cov-report=term-missing
 
 # В Docker
 docker compose run --rm test
+```
+
+Если хотите локально повторить проверки качества из раздела безопасности,
+дополнительно понадобятся:
+
+```powershell
+pip install bandit pip-audit safety
 ```
 
 **66 тестов** (11 calculator + 22 database + 9 health_connect + 13 service_state + 12 integration).
