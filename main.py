@@ -32,6 +32,9 @@ try:
     ANDROID = True
 except ImportError:
     pass
+except Exception:
+    # На Windows может возникать ошибка при поиске JAVA_HOME / JVM
+    pass
 
 # Настройка логирования
 def setup_logging():

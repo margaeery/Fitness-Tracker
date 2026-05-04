@@ -21,6 +21,9 @@ try:
     ANDROID = True
 except ImportError:
     pass
+except Exception:
+    # На Windows может возникать ошибка при поиске JAVA_HOME
+    pass
 
 # Разрешения на чтение данных из Health Connect
 HC_READ_PERMISSIONS = [
