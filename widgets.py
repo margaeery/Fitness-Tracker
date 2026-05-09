@@ -273,7 +273,7 @@ class StatsScreen(Screen):
             raw_data = d_dict[self.data_type]
             final = [raw_data[d_lbls.index(l)] if l in d_lbls else 0 for l in lbls]
             
-            # Заголовок: 16.03 - 22.03 2026
+            # Формат заголовка: "день.месяц - день.месяц год"
             year_str = start.strftime('%Y')
             self.ids.chart_label.text = f"{lbls[0]} - {lbls[-1]} {year_str}"
             self.ids.chart.labels, self.ids.chart.data = lbls, final

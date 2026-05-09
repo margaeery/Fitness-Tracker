@@ -4,8 +4,7 @@
 # Модификации:
 #   1. AndroidManifest.tmpl.xml — HC intent-filters, foregroundServiceType="health", <queries>
 #   2. build.tmpl.gradle — исключение дублирующихся kotlin-stdlib-jdk7/jdk8
-#
-# Патчи идемпотентны: повторный вызов безопасен.
+
 set -e
 
 PATCHES_DIR="$(cd "$(dirname "$0")/../patches" && pwd)"

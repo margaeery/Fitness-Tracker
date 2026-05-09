@@ -9,7 +9,7 @@
   пишет в БД каждые 15 сек — быстрое обновление UI
 - Обрабатывает смену дня (полночь): сохраняет данные за прошлый день,
   сбрасывает baseline для нового
-- Отправляет push-уведомление через plyer при достижении цели шагов
+- Отправляет push-уведомление при достижении цели шагов
 - setAutoRestartService(True) — Android перезапускает сервис при убийстве
 
 Коммуникация с приложением:
@@ -389,15 +389,15 @@ def main():
 
     # Интервалы для двух режимов
     # Background (приложение свёрнуто/закрыто): экономим батарею
-    BG_CHECK  = 60    # проверка датчика каждые 60 сек
-    BG_SAVE   = 600   # запись в БД каждые 10 мин
+    BG_CHECK  = 60 
+    BG_SAVE   = 600  
 
     # Foreground (приложение на экране): быстрое обновление
-    FG_CHECK  = 10    # проверка датчика каждые 10 сек
-    FG_SAVE   = 15    # запись в БД каждые 15 сек (совпадает с check)
+    FG_CHECK  = 10  
+    FG_SAVE   = 15
 
     # HC sync из сервиса (в фоне ~10 мин)
-    HC_BG_INTERVAL = 600  # 10 мин
+    HC_BG_INTERVAL = 600
 
     current_mode = 'background'
     check_interval = BG_CHECK
@@ -443,7 +443,7 @@ def main():
                 state.save_to_db()
 
             # HC sync из сервиса (только в фоне, ~10 мин)
-            # В foreground HC sync делает основное приложение каждые 20с
+            # В foreground HC sync делает основное приложение каждые 10с
             if current_mode == 'background' and \
                time.time() - last_hc_sync >= HC_BG_INTERVAL:
                 try:
